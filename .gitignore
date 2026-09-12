@@ -1,0 +1,10 @@
+# Scan cache, backups and the installed-version stamp — all machine-local.
+.cache/
+
+# Per-install settings (which repo to update from). Detected from the git
+# remote when you clone, so it doesn't belong in the repo.
+config.json
+
+__pycache__/
+*.pyc
+*.new
