@@ -23,6 +23,8 @@ DEFAULTS = {
     "auto_refresh": False,       # re-scan on its own once the data goes stale
     "auto_refresh_hours": 12,    # how old "stale" means
     "refresh_on_open": False,    # scan at launch if the data is already stale
+    "check_updates_on_open": True,   # ask GitHub for a newer version at startup
+    "check_updates_on_open": True,   # ask GitHub for a newer version at startup
     "budget_gil": 0,             # 0 = don't track
     "affordable_only": False,    # hide rows a run couldn't pay for
     "uncontested_only": False,   # hide rows with sellers under you

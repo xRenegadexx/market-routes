@@ -335,6 +335,13 @@ class App(tk.Tk):
                              background=PANEL, foreground=INK,
                              activebackground="#33291a", activeforeground=GOLD,
                              selectcolor=GOLD)
+        self.upd_var = tk.BooleanVar(
+            value=self.settings.get("check_updates_on_open", True))
+        data.add_checkbutton(label="Check for a new version when the app opens",
+                             variable=self.upd_var, command=self._save_prefs,
+                             background=PANEL, foreground=INK,
+                             activebackground="#33291a", activeforeground=GOLD,
+                             selectcolor=GOLD)
         bar.add_cascade(label="Data", menu=data)
 
         setmenu = tk.Menu(bar, tearoff=0, **opts)
@@ -355,6 +362,7 @@ class App(tk.Tk):
 
     def _save_prefs(self):
         self.settings["refresh_on_open"] = self.open_var.get()
+        self.settings["check_updates_on_open"] = self.upd_var.get()
         store.save_settings(self.settings)
 
     def about(self):
@@ -989,8 +997,12 @@ class App(tk.Tk):
         tree.tag_configure("best", foreground=GOOD)
         tree.tag_configure("loss", foreground=INK_3)
         tree.tag_configure("cheap", foreground=GOLD)
+        tree.bind("<Double-1>", lambda e: self.show_lookup_detail())
+        tree.bind("<Return>", lambda e: self.show_lookup_detail())
+        tree.bind("<space>", lambda e: self.show_lookup_detail())
         tree.pack(fill="both", expand=True)
         self.find_tree = tree
+        self.lookup_rows = {}
         self._refresh_matches()
 
     # -- autocomplete ------------------------------------------------------
@@ -1159,6 +1171,7 @@ class App(tk.Tk):
         """One row per world, grouped by region, both qualities."""
         tree = self.find_tree
         tree.delete(*tree.get_children())
+        self.lookup_rows = {}
         notes = []
 
         for quality in ("HQ", "NQ"):
@@ -1198,7 +1211,7 @@ class App(tk.Tk):
                         tags.append("cheap")
                     elif r["net"] is not None and r["net"] <= 0:
                         tags.append("loss")
-                    tree.insert(parent, "end", tags=tags, values=(
+                    node = tree.insert(parent, "end", tags=tags, values=(
                         "", r["world"], quality,
                         f"{r['buy']:,}" if r["buy"] else "— none —",
                         f"{r['units']:,}" if r["units"] else "—",
@@ -1207,6 +1220,7 @@ class App(tk.Tk):
                         f"{r['sold']:,}" if r["sold"] else "—",
                         f"{r['net']:,}" if r["net"] is not None else "—",
                         f"{r['margin']}%" if r["margin"] is not None else "—"))
+                    self.lookup_rows[node] = dict(r, name=name, q=quality)
 
         self.find_head.configure(
             text=f"{name}\n" + "     ".join(notes) if notes else name)
@@ -1218,6 +1232,132 @@ class App(tk.Tk):
                             f"{top['world']} ({top['region']}).")
         else:
             self.status.set(f"{name}: nothing profitable anywhere right now.")
+
+    def show_lookup_detail(self):
+        """The board behind a row in the lookup results.
+
+        The route tabs let you open a row and see the wall; this is the same
+        thing for a world you found through search, so the two halves of the
+        app behave alike instead of one of them being a dead end.
+        """
+        sel = self.find_tree.selection()
+        if not sel:
+            return
+        row = self.lookup_rows.get(sel[0])
+        if not row:
+            return          # a region heading, not a world
+
+        win = tk.Toplevel(self)
+        win.title(f"{row['name']} - {row['world']}")
+        win.configure(bg=BG)
+        win.geometry(f"{self.px(760)}x{self.px(640)}")
+        win.transient(self)
+
+        head = ttk.Frame(win)
+        head.pack(fill="x", padx=18, pady=(16, 0))
+        ttk.Label(head, text=row["name"], style="Head.TLabel").pack(anchor="w")
+        ttk.Label(head, style="Dim.TLabel",
+                  text=f"{row['q']} · {row['world']} · {row['region']} · "
+                       f"{row['dc']} data centre").pack(anchor="w", pady=(2, 0))
+
+        facts = ttk.Frame(win, style="Panel.TFrame")
+        facts.pack(fill="x", padx=18, pady=(14, 0))
+        cells = (
+            ("CHEAPEST HERE",
+             f"{row['buy']:,}" if row["buy"] else "nothing listed",
+             f"{row['units']:,} units in {row['listings']} listings"
+             if row["units"] else "no stock on this world"),
+            ("SELLS FOR", f"{row['sell']:,}" if row["sell"] else "—",
+             f"{row['sold']:,} sold · {fmt('rate', row['rate'])}/day"),
+            ("NET / UNIT", f"{row['net']:,}" if row["net"] is not None else "—",
+             f"{row['margin']}% buying at the cheapest board"
+             if row["margin"] is not None else "needs a price on both sides"),
+        )
+        for i, (k, v, note) in enumerate(cells):
+            cell = ttk.Frame(facts, style="Panel.TFrame")
+            cell.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 1, 0))
+            facts.columnconfigure(i, weight=1, uniform="lfacts")
+            ttk.Label(cell, text=k, style="Key.TLabel").pack(anchor="w", padx=12,
+                                                             pady=(10, 1))
+            ttk.Label(cell, text=v, style="Val.TLabel").pack(anchor="w", padx=12)
+            ttk.Label(cell, text=note, style="Note.TLabel", wraplength=self.px(200)
+                      ).pack(anchor="w", padx=12, pady=(1, 10))
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=18, pady=(14, 0))
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 9))
+        ttk.Label(left, text=f"THE WALL ON {row['world'].upper()}",
+                  style="Dim.TLabel").pack(anchor="w")
+        wall = row.get("wall") or []
+        wtree = ttk.Treeview(left, columns=("p", "q", "r"), show="headings",
+                             height=9)
+        for key, label, width, anchor_ in (("p", "Price", 100, "e"),
+                                           ("q", "Qty", 50, "e"),
+                                           ("r", "Retainer", 140, "w")):
+            wtree.heading(key, text=label)
+            wtree.column(key, width=self.px(width), anchor=anchor_)
+        wtree.tag_configure("odd", background=PANEL_2)
+        wtree.tag_configure("picked", foreground=GOLD)
+        yours = store.retainers_on(self.settings.get("retainers"), row["world"])
+        mine_here = 0
+        for i, pair in enumerate(wall):
+            who = (pair[2] if len(pair) > 2 else None) or ""
+            is_mine = bool(yours) and who.lower() in yours
+            mine_here += 1 if is_mine else 0
+            tags = ["odd"] if i % 2 else []
+            if is_mine:
+                tags.append("picked")
+            wtree.insert("", "end", tags=tags,
+                         values=(f"{pair[0]:,}", f"{pair[1]:,}",
+                                 (who + "  <- you") if is_mine else who))
+        if not wall:
+            wtree.insert("", "end", values=("- none listed -", "", ""))
+        wtree.pack(fill="both", expand=True, pady=(6, 0))
+        note = (f"{sum(p[1] for p in wall):,} units across {len(wall)} listings."
+                if wall else
+                f"Nothing listed on {row['world']} - you would set the price.")
+        if mine_here:
+            note += f"  {mine_here} of them yours."
+        ttk.Label(left, style="Dim.TLabel", wraplength=self.px(320),
+                  justify="left", text=note).pack(anchor="w", pady=(6, 0))
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(9, 0))
+        ttk.Label(right, text="WHAT IT ACTUALLY SOLD FOR",
+                  style="Dim.TLabel").pack(anchor="w")
+        hist = row.get("hist") or []
+        canvas = tk.Canvas(right, height=self.px(150), bg=PANEL,
+                           highlightthickness=0)
+        canvas.pack(fill="x", pady=(6, 0))
+        canvas.after(30, lambda: self._draw_history(canvas, hist,
+                                                    row.get("sell") or 0))
+        htree = ttk.Treeview(right, columns=("p", "q", "w"), show="headings",
+                             height=6)
+        for key, label, width in (("p", "Price", 100), ("q", "Qty", 50),
+                                  ("w", "When", 90)):
+            htree.heading(key, text=label)
+            htree.column(key, width=self.px(width),
+                         anchor="e" if key != "w" else "w")
+        htree.tag_configure("odd", background=PANEL_2)
+        for i, entry in enumerate(hist):
+            ago = (time.time() - entry[2]) / 86400
+            htree.insert("", "end", tags=("odd",) if i % 2 else (),
+                         values=(f"{entry[0]:,}", f"{entry[1]:,}",
+                                 fmt("dur", ago) + " ago"))
+        if not hist:
+            htree.insert("", "end", values=("no recorded sales", "", ""))
+        htree.pack(fill="both", expand=True, pady=(6, 0))
+
+        foot = ttk.Frame(win)
+        foot.pack(fill="x", padx=18, pady=14)
+        ttk.Button(foot, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(foot, text="Open on Universalis",
+                   command=lambda: webbrowser.open(
+                       "https://universalis.app/market/%d" % row["id"])).pack(
+                           side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda e: win.destroy())
 
     # -- auto refresh ------------------------------------------------------
 
@@ -1353,6 +1493,11 @@ class App(tk.Tk):
     # -- data --------------------------------------------------------------
 
     def _load_cache(self):
+        if self.settings.get("check_updates_on_open", True):
+            # A moment after the window is up, so it never delays the app
+            # appearing, and silent unless there is genuinely something newer.
+            # Nobody wants a dialog on every launch telling them they're fine.
+            self.after(2500, lambda: self.check_update(quiet=True))
         cached = engine.load_cached()
         if cached:
             self.apply(cached, note="from last scan")
@@ -1844,24 +1989,35 @@ class App(tk.Tk):
 
     # -- updates -----------------------------------------------------------
 
-    def check_update(self):
-        self.status.set("Checking GitHub for an update…")
+    def check_update(self, quiet=False):
+        """Ask GitHub whether there's a newer version.
+
+        `quiet` is the startup check: it says nothing when you're up to date
+        and says nothing when it fails, because being offline or having no
+        repository configured is not something to interrupt anyone about.
+        """
+        if not quiet:
+            self.status.set("Checking GitHub for an update…")
 
         def work():
             try:
-                self.queue.put(("update", ("ok", update.check()), None))
+                self.queue.put(("update", ("ok", update.check(), quiet), None))
             except update.UpdateError as exc:
-                self.queue.put(("update", ("fail", str(exc)), None))
+                self.queue.put(("update", ("fail", str(exc), quiet), None))
 
         threading.Thread(target=work, daemon=True).start()
 
     def _update_result(self, payload):
-        kind, body = payload
+        kind, body, quiet = payload
         if kind == "fail":
+            if quiet:
+                return          # startup check: stay out of the way
             self.status.set("Update check failed.")
             self.show_banner(body, self.check_update, "Try again")
             return
         if not body["available"]:
+            if quiet:
+                return
             if not body["known"]:
                 update.remember(body["sha"], body["slug"])
             self.status.set(f"Up to date — {paths.VERSION} is the newest "

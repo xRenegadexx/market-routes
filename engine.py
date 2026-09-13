@@ -1134,6 +1134,7 @@ def lookup_item(item_id, geo, report=None, should_stop=None):
                                     dc_median * PRICE_SANITY if dc_median else None)
                         if p]
                 rows.append({
+                    "id": item_id,
                     "world": wname,
                     "dc": scope,
                     "region": region_of.get(scope, "?"),
