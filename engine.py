@@ -774,6 +774,9 @@ def standing(rows, listing, mine_names, price_of, qty_of, name_of):
     the same price are not ten people undercutting you, and being the tenth row
     on the board is not the same as being tenth in line -- treating them as
     competition made the app report you undercut by yourself.
+
+    `rows` must already be one quality only; see split_quality. This function
+    can't tell HQ from NQ and will happily rank them against each other.
     """
     mine_price = price_of(listing)
     others = [x for x in rows if str(name_of(x) or "").lower() not in mine_names]
@@ -785,6 +788,28 @@ def standing(rows, listing, mine_names, price_of, qty_of, name_of):
         "of": len(others) + 1,
         "ties": sum(1 for x in others if price_of(x) == mine_price),
     }
+
+
+def split_quality(listings):
+    """Separate a board's listings into HQ and NQ, cheapest first.
+
+    They arrive in one list and sit on one board in game, but they are not one
+    market. Someone shopping for HQ filters NQ out of the board entirely, and
+    NQ is nearly always the cheaper of the two -- so ranking them together
+    makes almost every HQ listing look undercut by stock no HQ buyer will ever
+    be offered.
+
+    Yields (hq, rows). A quality nobody has listed is skipped, which also means
+    items that can't be HQ at all simply yield the one group.
+    """
+    usable = [l for l in listings
+              if isinstance(l, dict)
+              and isinstance(l.get("pricePerUnit"), (int, float))]
+    for hq in (True, False):
+        rows = sorted([l for l in usable if bool(l.get("hq")) == hq],
+                      key=lambda l: l["pricePerUnit"])
+        if rows:
+            yield hq, rows
 
 
 def mine(listings, names_on_world):
@@ -904,32 +929,30 @@ def sweep_for_listings(retainers, names=None, report=None, should_stop=None):
 
         for batch in F.map(pull, groups, f"Searching {world}"):
             for item_id, payload in batch.items():
-                rows = sorted([l for l in (payload.get("listings") or [])
-                               if isinstance(l, dict)
-                               and isinstance(l.get("pricePerUnit"), (int, float))],
-                              key=lambda l: l["pricePerUnit"])
-                mine_count = sum(
-                    1 for x in rows
-                    if str(x.get("retainerName") or "").strip().lower() in wanted)
-                for l in rows:
-                    who = str(l.get("retainerName") or "").strip()
-                    if who.lower() not in wanted:
-                        continue
-                    rank = standing(rows, l, wanted,
-                                    lambda x: x["pricePerUnit"],
-                                    lambda x: x.get("quantity"),
-                                    lambda x: x.get("retainerName"))
-                    found.append({
-                        "id": item_id,
-                        "name": names.get(item_id) or f"item {item_id}",
-                        "q": "HQ" if l.get("hq") else "NQ",
-                        "world": world,
-                        "price": l["pricePerUnit"],
-                        "qty": l.get("quantity") or 0,
-                        "retainer": who,
-                        "mine_on_board": mine_count,
-                        **rank,
-                    })
+                for hq, rows in split_quality(payload.get("listings") or []):
+                    mine_count = sum(
+                        1 for x in rows
+                        if str(x.get("retainerName") or "").strip().lower()
+                        in wanted)
+                    for l in rows:
+                        who = str(l.get("retainerName") or "").strip()
+                        if who.lower() not in wanted:
+                            continue
+                        rank = standing(rows, l, wanted,
+                                        lambda x: x["pricePerUnit"],
+                                        lambda x: x.get("quantity"),
+                                        lambda x: x.get("retainerName"))
+                        found.append({
+                            "id": item_id,
+                            "name": names.get(item_id) or f"item {item_id}",
+                            "q": "HQ" if hq else "NQ",
+                            "world": world,
+                            "price": l["pricePerUnit"],
+                            "qty": l.get("quantity") or 0,
+                            "retainer": who,
+                            "mine_on_board": mine_count,
+                            **rank,
+                        })
 
     # Name only what was actually found -- a couple of requests, rather than
     # building the whole 17,000-item index just to label a few dozen rows.
@@ -987,13 +1010,14 @@ def find_my_listings(retainers, world_names_for):
         listings = payload.get("listings") or []
         if not listings:
             continue
-        # Rank within each world, so we can say where you sit on that board.
+        # Rank within each world *and* quality, so we can say where you sit on
+        # the board an actual buyer is looking at.
         ranked = {}
         for l in sorted([x for x in listings if isinstance(x, dict)],
                         key=lambda x: (x.get("worldID"), x.get("pricePerUnit") or 0)):
-            ranked.setdefault(l.get("worldID"), []).append(l)
+            ranked.setdefault((l.get("worldID"), bool(l.get("hq"))), []).append(l)
 
-        for wid, rows in ranked.items():
+        for (wid, hq), rows in ranked.items():
             world = world_names_for.get(wid)
             if not world:
                 continue
@@ -1014,8 +1038,8 @@ def find_my_listings(retainers, world_names_for):
                                 lambda x: x.get("r"))
                 # The same board appears under both a DC and a region scope, so
                 # the same listing can be seen twice. Keep one of each.
-                sig = (item_id, wid, l.get("pricePerUnit"), l.get("quantity"),
-                       who.lower(), position)
+                sig = (item_id, wid, hq, l.get("pricePerUnit"),
+                       l.get("quantity"), who.lower(), position)
                 if sig in seen:
                     continue
                 seen.add(sig)
@@ -1023,7 +1047,7 @@ def find_my_listings(retainers, world_names_for):
                 found.append({
                     "id": item_id,
                     "name": meta.get("n") or f"item {item_id}",
-                    "q": "HQ" if l.get("hq") else "NQ",
+                    "q": "HQ" if hq else "NQ",
                     "world": world,
                     "price": l.get("pricePerUnit"),
                     "qty": l.get("quantity"),
