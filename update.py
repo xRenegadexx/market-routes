@@ -1,38 +1,57 @@
 #!/usr/bin/env python3
 """
-Self-update for the FFXIV market tool.
+Self-update.
 
-The app pulls its own source files from one GitHub repository over HTTPS and
-swaps them in. That repository is worked out from the folder's git remote, or
-from config.json if there's no git checkout -- it is never taken from anything
-downloaded, so a compromised response can't redirect the updater somewhere else.
+Two situations, two mechanisms:
 
-Worth understanding before you use it: an update replaces the code this app runs
-next time it starts. Whoever can push to that repository can change what runs on
-your machine. That's fine for your own repo; don't point it at someone else's.
+  Built .exe   Downloads the newest exe from the repository's GitHub Releases
+               and swaps itself for it. Windows won't let a running program be
+               overwritten, but it will let one be *renamed* -- so the live exe
+               is moved aside and the new one takes its name. The old copy is
+               deleted on the next start, which doubles as the rollback if the
+               new one won't run.
 
-Nothing updates silently. Checking is a button, installing is a second button,
-and the previous version is kept in .cache/backup so you can put it back.
+  From source  Downloads the tracked .py files at the newest commit, the same
+               way it always has.
+
+Worth understanding before using either: an update replaces the code this app
+runs. Whoever can push to that repository decides what runs on your machine the
+next time you start it. That is fine for your own repo; don't point it at
+someone else's.
+
+Nothing happens silently. Checking is a button, installing is a second button,
+and a confirmation sits between them.
 """
 
 import json
 import os
 import re
 import shutil
+import sys
 import urllib.error
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE = os.path.join(HERE, ".cache")
+import paths
+
+HERE = paths.home()
+CACHE = paths.DATA_DIR
 BACKUP = os.path.join(CACHE, "backup")
 STAMP = os.path.join(CACHE, "installed.json")
 CONFIG = os.path.join(HERE, "config.json")
 
-# The files an update is allowed to replace. Anything else in the repo is ignored.
-TRACKED = ["app.py", "engine.py", "update.py", "run.bat", "README.md"]
+# The files a source install is allowed to replace.
+TRACKED = ["app.py", "engine.py", "store.py", "paths.py", "update.py",
+           "make_icon.py", "run.bat", "README.md"]
 
 UA = {"User-Agent": "ffxiv-arb-updater/1.0", "Accept": "application/vnd.github+json"}
-TIMEOUT = 20
+TIMEOUT = 30
+MAX_DOWNLOAD = 200 * 1024 * 1024
+
+# GitHub serves release assets from its own host and then redirects to a CDN.
+# Both are expected; anything else is not.
+ASSET_HOSTS = ("https://github.com/", "https://api.github.com/",
+               "https://objects.githubusercontent.com/",
+               "https://release-assets.githubusercontent.com/")
 
 
 class UpdateError(Exception):
@@ -40,21 +59,23 @@ class UpdateError(Exception):
 
 
 # ----------------------------------------------------------------------------
-# Where are we updating from
+# Which repository
 # ----------------------------------------------------------------------------
 
 def repo_slug():
-    """'owner/name' for this install, or None if it isn't configured yet."""
-    if os.path.exists(CONFIG):
+    """'owner/name' for this install, or None if it isn't configured."""
+    for path in (CONFIG, paths.resource("config.json")):
         try:
-            with open(CONFIG, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8-sig") as fh:
                 slug = (json.load(fh) or {}).get("repo")
             if slug and re.fullmatch(r"[\w.-]+/[\w.-]+", slug):
                 return slug
         except (OSError, json.JSONDecodeError, AttributeError):
-            pass
+            continue
 
-    # Fall back to the git remote, so a normal clone needs no config at all.
+    if getattr(paths, "REPO", "") and re.fullmatch(r"[\w.-]+/[\w.-]+", paths.REPO):
+        return paths.REPO
+
     git_config = os.path.join(HERE, ".git", "config")
     if os.path.exists(git_config):
         try:
@@ -68,24 +89,27 @@ def repo_slug():
     return None
 
 
-def _api(url):
-    if not url.startswith("https://api.github.com/"):
-        raise UpdateError("Refusing to call a non-GitHub URL.")
+def _get(url, hosts=("https://api.github.com/",), binary=False):
+    if not url.startswith(hosts):
+        raise UpdateError(f"Refusing to fetch an unexpected URL: {url[:70]}")
     try:
         req = urllib.request.Request(url, headers=UA)
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            if not r.geturl().startswith("https://api.github.com/"):
-                raise UpdateError("GitHub redirected the request off-site.")
-            return json.loads(r.read(4 * 1024 * 1024).decode())
+            if not r.geturl().startswith(hosts):
+                raise UpdateError("The download redirected somewhere unexpected; "
+                                  "stopping rather than running it.")
+            body = r.read(MAX_DOWNLOAD + 1)
+            if len(body) > MAX_DOWNLOAD:
+                raise UpdateError("That download is far larger than expected.")
+            return body if binary else json.loads(body.decode())
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise UpdateError(
-                "GitHub returned 'not found'. If the repository is private, the "
-                "updater can't read it without a token — make it public, or "
-                "update by running: git pull") from e
+                "GitHub returned 'not found'. Either the repository is private "
+                "(the updater can't read those without a token) or it has no "
+                "releases yet.") from e
         if e.code == 403:
-            raise UpdateError(
-                "GitHub rate-limited this check. Try again in a few minutes.") from e
+            raise UpdateError("GitHub rate-limited this check. Try again shortly.") from e
         raise UpdateError(f"GitHub returned HTTP {e.code}.") from e
     except (urllib.error.URLError, OSError) as e:
         raise UpdateError(f"Couldn't reach GitHub: {e}") from e
@@ -93,42 +117,81 @@ def _api(url):
         raise UpdateError("GitHub sent a response this tool couldn't read.") from e
 
 
+# ----------------------------------------------------------------------------
+# Versions
+# ----------------------------------------------------------------------------
+
+def parse_version(text):
+    """'v1.7.1' -> (1, 7, 1). Unparseable versions sort lowest."""
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", str(text or ""))
+    return tuple(int(g) for g in m.groups()) if m else (0, 0, 0)
+
+
 def installed_sha():
     try:
-        with open(STAMP, encoding="utf-8") as fh:
+        with open(STAMP, encoding="utf-8-sig") as fh:
             return (json.load(fh) or {}).get("sha")
     except (OSError, json.JSONDecodeError, AttributeError):
         return None
 
 
-def check():
-    """Ask GitHub what the newest commit is.
+def remember(sha, slug):
+    os.makedirs(CACHE, exist_ok=True)
+    try:
+        with open(STAMP, "w", encoding="utf-8") as fh:
+            json.dump({"sha": sha, "slug": slug}, fh)
+    except OSError:
+        pass
 
-    Returns a dict describing the situation; never raises for 'no update'.
-    """
+
+# ----------------------------------------------------------------------------
+# Checking
+# ----------------------------------------------------------------------------
+
+def check():
+    """What's the newest version, and is it newer than this one?"""
     slug = repo_slug()
     if not slug:
         raise UpdateError(
-            "No repository configured yet. Push this folder to GitHub, then "
-            "either clone it back or put {\"repo\": \"you/ffxiv-arb\"} in "
-            "config.json next to app.py.")
-    data = _api(f"https://api.github.com/repos/{slug}/commits?per_page=1")
+            "No repository configured yet. Put {\"repo\": \"you/ffxiv-arb\"} in "
+            "config.json next to the app, or run it from a git clone.")
+
+    if paths.FROZEN:
+        rel = _get(f"https://api.github.com/repos/{slug}/releases/latest")
+        tag = rel.get("tag_name") or ""
+        asset = next((a for a in (rel.get("assets") or [])
+                      if str(a.get("name", "")).lower().endswith(".exe")), None)
+        if not asset:
+            raise UpdateError(
+                f"The newest release of {slug} ({tag or 'untagged'}) has no .exe "
+                f"attached, so there's nothing to install.")
+        newest = parse_version(tag)
+        mine = parse_version(paths.VERSION)
+        return {
+            "mode": "exe", "slug": slug, "version": tag or "?",
+            "short": tag or "?",
+            "message": (rel.get("name") or "").strip(),
+            "date": (rel.get("published_at") or "")[:10],
+            "url": asset.get("browser_download_url"),
+            "size": asset.get("size") or 0,
+            "available": newest > mine,
+            "known": True,
+        }
+
+    data = _get(f"https://api.github.com/repos/{slug}/commits?per_page=1")
     if not isinstance(data, list) or not data:
         raise UpdateError(f"{slug} has no commits yet.")
     head = data[0]
     sha = head.get("sha")
     if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise UpdateError("GitHub returned a commit id this tool didn't recognise.")
-    message = ((head.get("commit") or {}).get("message") or "").splitlines()[:1]
     current = installed_sha()
+    message = ((head.get("commit") or {}).get("message") or "").splitlines()[:1]
     return {
-        "slug": slug,
-        "sha": sha,
-        "short": sha[:7],
+        "mode": "source", "slug": slug, "sha": sha, "short": sha[:7],
+        "version": sha[:7],
         "message": message[0] if message else "",
         "date": ((head.get("commit") or {}).get("author") or {}).get("date", "")[:10],
-        # First run after a manual clone has no stamp: treat that as up to date
-        # and record it, rather than nagging about an update to what's already here.
         "available": current is not None and current != sha,
         "known": current is not None,
     }
@@ -138,36 +201,86 @@ def check():
 # Installing
 # ----------------------------------------------------------------------------
 
-def _download(slug, sha, name):
+def _download_file(slug, sha, name):
     url = f"https://raw.githubusercontent.com/{slug}/{sha}/{name}"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": UA["User-Agent"]})
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             if not r.geturl().startswith(f"https://raw.githubusercontent.com/{slug}/"):
                 raise UpdateError(f"Download of {name} redirected off-site.")
-            return r.read(8 * 1024 * 1024)
+            return r.read(MAX_DOWNLOAD)
     except urllib.error.HTTPError as e:
         if e.code == 404:
-            return None          # file simply isn't in the repo; skip it
+            return None
         raise UpdateError(f"Couldn't download {name}: HTTP {e.code}") from e
     except (urllib.error.URLError, OSError) as e:
         raise UpdateError(f"Couldn't download {name}: {e}") from e
 
 
 def install(info):
-    """Fetch the tracked files at that commit and swap them in.
+    """Apply an update. Returns a short description of what changed."""
+    if info.get("mode") == "exe":
+        return _install_exe(info)
+    return _install_source(info)
 
-    Everything is downloaded and checked before a single live file is touched,
-    so a download that dies halfway can't leave a half-updated app behind.
+
+def _install_exe(info):
+    """Swap the running exe for the newly downloaded one.
+
+    Windows refuses to overwrite a running executable but allows renaming it,
+    so the live file is moved aside and the download takes its place. If
+    anything fails partway the original name is restored, so a failed update
+    leaves a working app rather than none.
     """
+    url = info.get("url") or ""
+    blob = _get(url, hosts=ASSET_HOSTS, binary=True)
+    if len(blob) < 1_000_000 or blob[:2] != b"MZ":
+        raise UpdateError("That download isn't a Windows program. Nothing was "
+                          "changed.")
+
+    live = os.path.abspath(sys.executable)
+    folder = os.path.dirname(live)
+    incoming = os.path.join(folder, "update-incoming.exe")
+    retired = os.path.join(folder, "previous-version.exe")
+
+    try:
+        with open(incoming, "wb") as fh:
+            fh.write(blob)
+    except OSError as e:
+        raise UpdateError(f"Couldn't write the new version: {e}") from e
+
+    try:
+        if os.path.exists(retired):
+            os.remove(retired)
+    except OSError:
+        pass
+
+    try:
+        os.replace(live, retired)      # allowed even while running
+    except OSError as e:
+        _quiet_remove(incoming)
+        raise UpdateError(
+            f"Couldn't move the current version aside: {e}. If the app is in a "
+            f"folder you can't write to, move it somewhere like your Desktop "
+            f"and try again.") from e
+
+    try:
+        os.replace(incoming, live)
+    except OSError as e:
+        os.replace(retired, live)      # put things back exactly as they were
+        raise UpdateError(f"Couldn't put the new version in place: {e}") from e
+
+    return [f"{os.path.basename(live)} -> {info.get('version', 'newest')}"]
+
+
+def _install_source(info):
     slug, sha = info["slug"], info["sha"]
     staged = {}
     for name in TRACKED:
-        body = _download(slug, sha, name)
+        body = _download_file(slug, sha, name)
         if body is None:
             continue
         if name.endswith(".py"):
-            # Refuse anything that isn't valid Python rather than break the app.
             try:
                 compile(body.decode("utf-8"), name, "exec")
             except (SyntaxError, UnicodeDecodeError) as e:
@@ -189,21 +302,32 @@ def install(info):
             fh.write(body)
         os.replace(tmp, os.path.join(HERE, name))
 
-    os.makedirs(CACHE, exist_ok=True)
-    with open(STAMP, "w", encoding="utf-8") as fh:
-        json.dump({"sha": sha, "slug": slug, "files": sorted(staged)}, fh)
+    remember(sha, slug)
     return sorted(staged)
 
 
-def remember(sha, slug):
-    """Record the current commit without changing any files."""
-    os.makedirs(CACHE, exist_ok=True)
-    with open(STAMP, "w", encoding="utf-8") as fh:
-        json.dump({"sha": sha, "slug": slug}, fh)
+def _quiet_remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def tidy_after_restart():
+    """Delete the version we replaced. Called once at startup.
+
+    Kept until now on purpose: while it exists you can rename it back by hand
+    if a new build turns out to be broken.
+    """
+    if not paths.FROZEN:
+        return
+    folder = os.path.dirname(os.path.abspath(sys.executable))
+    for leftover in ("previous-version.exe", "update-incoming.exe"):
+        _quiet_remove(os.path.join(folder, leftover))
 
 
 def restore():
-    """Put the previous version back after a bad update."""
+    """Put the previous version back after a bad source update."""
     if not os.path.isdir(BACKUP):
         raise UpdateError("There's no backup to restore.")
     names = [n for n in os.listdir(BACKUP) if n in TRACKED]
@@ -217,15 +341,15 @@ def restore():
 if __name__ == "__main__":
     try:
         info = check()
-        print(f"Repository : {info['slug']}")
-        print(f"Latest     : {info['short']}  {info['date']}  {info['message']}")
-        print(f"Installed  : {installed_sha() or '(not recorded yet)'}")
+        print(f"Repository : {info['slug']}  ({info['mode']} install)")
+        print(f"Installed  : {paths.VERSION}")
+        print(f"Newest     : {info['version']}  {info.get('date','')}  "
+              f"{info.get('message','')}")
         if info["available"]:
-            print("\nAn update is available. Installing…")
+            print("\nInstalling…")
             print("Replaced:", ", ".join(install(info)))
             print("Restart the app to run it.")
         else:
-            remember(info["sha"], info["slug"])
             print("\nUp to date.")
     except UpdateError as exc:
         raise SystemExit(f"Update check failed: {exc}")

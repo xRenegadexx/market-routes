@@ -6,17 +6,33 @@ lives on and every number re-prices against that world's board.
 
 ## Running it
 
-Double-click `run.bat`, or:
+**Just want to use it:** download `FFXIV Market Routes.exe` and double-click it.
+Nothing else to install — no Python, no setup. Windows 64-bit.
+
+Two things to expect the first time:
+
+- **"Windows protected your PC."** The exe isn't code-signed (that needs a paid
+  certificate), so SmartScreen warns about it. Click *More info* → *Run anyway*.
+- **Your antivirus may grumble.** Apps built this way share a bootloader with
+  some malware, so scanners flag them by association. It's a false positive, and
+  you can check for yourself: the source is right here in this repo.
+
+It opens with no data. Press **Refresh data** and give it a few minutes — it's
+reading every marketable item on both sides. After that it opens instantly on the
+last scan, and refreshing is something you do when you feel like it.
+
+The exe keeps its scans and settings in a `data` folder next to itself, so put it
+somewhere it can write — your Desktop or Downloads is fine, Program Files isn't.
+If the folder beside it is read-only it falls back to your local app data.
+
+### Running from source instead
+
+Needs Python 3.9+ with tkinter. Double-click `run.bat` (it checks your setup and
+tells you what's missing), or:
 
 ```bash
 python app.py
 ```
-
-Nothing to install — standard library only. Python 3.9 or newer.
-
-The window opens on the last scan's data straight away. **Refresh data** pulls a
-fresh one, which takes several minutes and shows progress as it goes. You can keep
-reading the old data while it runs, and **Stop** aborts it.
 
 For a refresh with no window (e.g. from Task Scheduler):
 
@@ -24,17 +40,70 @@ For a refresh with no window (e.g. from Task Scheduler):
 python engine.py
 ```
 
-## The three tabs
+### Building the exe yourself
+
+```bash
+pip install pyinstaller
+python -m PyInstaller --onefile --windowed --name "FFXIV Market Routes" app.py
+```
+
+The result lands in `dist/`.
+
+## The tabs
 
 | Tab | Buy | Sell |
 |---|---|---|
 | **Big ticket** | anywhere in NA | one Materia world |
 | **Bulk & consumables** | anywhere in NA | one Materia world |
 | **Materia → NA** | anywhere on Materia | one NA world |
+| **Shopping list** | what you've ticked, grouped by where to buy it |
+| **My listings** | what you've listed, and whether anyone's under you |
 
-Each tab has its own world picker, because each sells somewhere different — five
-buttons for Materia, two dropdowns (data center, then world) for the thirty-two
-NA worlds.
+The three route tabs each have their own world picker, because each sells
+somewhere different — five buttons for Materia, two dropdowns (data center, then
+world) for the thirty-two NA worlds.
+
+Note that "big ticket" means high profit *per unit*, not expensive: most of those
+rows cost well under 500k gil to run.
+
+## Narrowing it down
+
+Text filter aside, there are three switches above the table:
+
+- **Only what I can afford** — hides anything whose buy price × buy quantity
+  exceeds the gil you entered on the shopping list tab
+- **Uncontested only** — hides rows where somebody is already listed under your
+  price on your world
+- **Min margin %** — a floor on the return
+
+A note beside them says how many rows are being hidden, so a filter you forgot
+about can't quietly empty the table.
+
+## The shopping list
+
+Click the ✓ column on any row to add it. The shopping list tab groups everything
+by the world you'd buy it on, so each heading is one trip, and totals the run
+against two budgets: the gil you have, and your free retainer slots. Either going
+over turns orange. **Copy as text** puts the whole list on the clipboard.
+
+The list survives between sessions.
+
+## Watching your listings
+
+Open any row (double-click) and the detail panel shows the actual wall on your
+world — every price and quantity — beside what the item has really been selling
+for, plotted over time with your intended price marked. A tall wall at a single
+price looks very different from a real market, which is the tell for a price one
+seller is propping up.
+
+**I listed this** records what you actually put up, and the **My listings** tab
+then tracks it. **Check my listings** queries only those items on only those
+worlds, so it takes seconds rather than the minutes a full scan needs, and tells
+you when somebody has gone under you.
+
+It cannot tell you an item *sold*. Listings carry no identity that could be
+matched against yours, so the app reports where your price sits on the board and
+leaves the conclusion to you.
 
 ## What it is actually measuring
 
@@ -64,6 +133,13 @@ by the window those sales span. Each DC is measured on its own clock, so a world
 a quiet DC isn't judged against a busy one, and a short burst can't be read as a
 permanent rate. `Sells in` is how long one unit takes at that rate.
 
+### The change column
+
+The last eight scans are kept as a compact digest — profit and sell price per item
+per world, not whole snapshots, which run to tens of megabytes each. The **Change**
+column shows how a margin moved since the previous scan, so you can see a spread
+closing before you buy into it. It stays blank until you have two scans.
+
 ## Guardrails on the numbers
 
 Crowd-sourced market data is noisy, so the scan throws out:
@@ -92,36 +168,82 @@ refresh that fails the same way leaves the old data alone rather than blanking i
 | `Ctrl+F` | jump to the filter box |
 | `[` `]` | move the sort column |
 | `Enter` | reverse the sort |
-| `Space` / double-click | open the item on Universalis |
+| double-click | open the item detail panel |
+| `Space` | open the item on Universalis |
+| `+` | add the selected row to the shopping list |
 | `Esc` | stop a running scan |
 
 ---
 
-## Putting it on GitHub
+## Releasing a new version
 
-You only do this once. It gives you a backup, and it's what the update button
-reads from.
+Testers run the .exe and update from inside the app. That works off **GitHub
+Releases**, not commits: the app asks for the newest release, compares its tag
+to its own version, and downloads the .exe attached to it.
 
-**1. Make the repository.** Go to <https://github.com/new>. Name it `ffxiv-arb`,
-leave it **Public**, and do *not* tick "Add a README" — this folder already has one.
-Click *Create repository*.
+So a release is three steps:
 
-> Public matters for the update button: reading a private repo needs an access
-> token, which this tool deliberately doesn't handle. If you'd rather keep it
-> private, that's fine — just update with `git pull` instead of the button.
+**1. Bump the version.** In `paths.py`:
 
-**2. Push this folder.** In a terminal here:
+```python
+VERSION = "1.8.0"
+```
+
+**2. Build.**
 
 ```bash
-git remote add origin https://github.com/YOUR-USERNAME/ffxiv-arb.git
+python -m PyInstaller --onefile --windowed --clean --noconfirm --name "FFXIV Market Routes" --icon icon.ico --add-data "icon.ico;." app.py
+```
+
+**3. Publish it.** Push your changes, then on GitHub go to *Releases* → *Draft a
+new release*, tag it **`v1.8.0`** (matching the version you just set), attach
+`dist/FFXIV Market Routes.exe`, and publish.
+
+That's it. Every tester's copy will offer the update next time they press the
+button.
+
+### What the tag has to look like
+
+The app compares version numbers, so the tag needs three numbers in it: `v1.8.0`
+or `1.8.0` both work, `v1.8` does not. A tag that doesn't parse sorts as
+`0.0.0`, which means nobody is ever offered the update — if a release seems
+invisible, check the tag first.
+
+The release must also have an `.exe` attached. A release with no attachment
+produces a clear message rather than a silent failure, but it still can't
+install anything.
+
+### How updating actually works
+
+Windows won't let a running program be overwritten, but it will let one be
+renamed. So the app downloads the new exe beside itself, renames the running one
+to `previous-version.exe`, and gives its name to the new one. On the next start
+the old copy is deleted.
+
+That leaves two useful properties: a download that fails or isn't a real program
+changes nothing, and if a new build misbehaves the previous one is sitting right
+there to rename back — until you restart, at which point it's cleaned up.
+
+Scans, shopping lists, tracked listings and colours live in the `data` folder and
+are never touched by an update.
+
+## Putting it on GitHub the first time
+
+**1. Make the repository.** <https://github.com/new>, named `ffxiv-market-routes`,
+**Public**, and don't tick "Add a README" — this folder has one.
+
+> Public matters: reading a private repo needs an access token, which this tool
+> deliberately doesn't handle.
+
+**2. Push.**
+
+```bash
+git remote add origin https://github.com/xRenegadexx/ffxiv-market-routes.git
 git branch -M main
 git push -u origin main
 ```
 
-Git will ask you to sign in to GitHub the first time; a browser window handles it.
-
-**3. That's it.** The update button now works, because the app reads the repo name
-straight out of `.git/config`.
+Git will ask you to sign in the first time; a browser window handles it.
 
 ### Changing something later
 
@@ -131,28 +253,8 @@ git commit -m "Describe what you changed"
 git push
 ```
 
-## The update button
-
-**Check for updates** asks GitHub for the newest commit in your repo. If it's
-different from what's installed, a banner offers to **Install**: the app downloads
-`app.py`, `engine.py`, `update.py`, `run.bat` and `README.md` at that commit,
-refuses any Python file that doesn't compile, copies the current version into
-`.cache/backup`, and swaps them in. Restart to run it.
-
-`python update.py` does the same from a terminal, and `update.restore()` puts the
-backup back.
-
-**Understand what this is.** An update replaces the code this app runs. Whoever can
-push to that repository decides what runs on your machine next time you start it —
-fine for your own repo, not something to point at a stranger's. Nothing happens
-silently: checking is one click, installing is a second, and a confirmation dialog
-sits in between.
-
-If you didn't clone from GitHub, put the repo in `config.json` next to `app.py`:
-
-```json
-{"repo": "YOUR-USERNAME/ffxiv-arb"}
-```
+Remember that pushing alone doesn't update anyone — testers get new versions from
+Releases, so follow the three steps above when you want them to.
 
 ## Files
 
@@ -160,8 +262,10 @@ If you didn't clone from GitHub, put the repo in `config.json` next to `app.py`:
 |---|---|
 | `app.py` | the window |
 | `engine.py` | scanning and analysis; runnable on its own |
+| `store.py` | shopping list, tracked listings and settings |
+| `paths.py` | works out where to keep data, source build or exe |
 | `update.py` | the GitHub updater; runnable on its own |
-| `.cache/` | last scan, backups, installed-version stamp — never committed |
+| `.cache/` | scans, trend history, your list — never committed |
 
 ## Privacy and network
 
@@ -176,6 +280,13 @@ No account, no API key, no telemetry, no analytics. Nothing about you is collect
 or transmitted. The cache holds prices and quantities only — the retainer names and
 seller IDs in the raw API responses are stripped before anything is written to disk.
 Delete `.cache/` any time; it rebuilds on the next refresh.
+
+## If it won't start
+
+There's no console behind the window, so a crash used to be silent. It isn't now:
+anything unhandled gets written to `error.log` (in the `data` folder beside the
+exe, or `.cache/` when running from source) and shown in a dialog. If you hit one,
+that file says what happened.
 
 ## Caveats
 
