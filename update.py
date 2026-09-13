@@ -7,9 +7,9 @@ Two situations, two mechanisms:
   Built .exe   Downloads the newest exe from the repository's GitHub Releases
                and swaps itself for it. Windows won't let a running program be
                overwritten, but it will let one be *renamed* -- so the live exe
-               is moved aside and the new one takes its name. The old copy is
-               deleted on the next start, which doubles as the rollback if the
-               new one won't run.
+               is moved aside and the new one takes its name. The moved-aside
+               copy goes into the data folder rather than staying next to the
+               app, and is deleted as soon as the app closes.
 
   From source  Downloads the tracked .py files at the newest commit, the same
                way it always has.
@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -57,6 +58,12 @@ ASSET_HOSTS = ("https://github.com/", "https://api.github.com/",
 
 class UpdateError(Exception):
     """Anything that stops an update, phrased for a person to read."""
+
+
+# The exe we replaced, waiting to be deleted. It can't be deleted while it is
+# still the image of this running process; see _delete_when_free.
+_PENDING_DELETE = None
+RETIRED_NAME = "previous-version.exe"
 
 
 # ----------------------------------------------------------------------------
@@ -254,7 +261,7 @@ def _install_exe(info):
     live = os.path.abspath(sys.executable)
     folder = os.path.dirname(live)
     incoming = os.path.join(folder, "update-incoming.exe")
-    retired = os.path.join(folder, "previous-version.exe")
+    retired = _retire_target(folder)
 
     try:
         with open(incoming, "wb") as fh:
@@ -265,9 +272,12 @@ def _install_exe(info):
             f"Move the app somewhere you can write to -- your Desktop is "
             f"fine -- and try again.") from e
 
-    _quiet_remove(retired)
+    _sweep_retired(folder)
 
-    # The fast path: rename the running image aside and take its name.
+    # The fast path: rename the running image aside and take its name. Windows
+    # allows a running program to be renamed but not deleted or overwritten,
+    # and a rename can cross folders as long as it stays on the same volume --
+    # which is what lets the old copy leave the app's folder entirely.
     try:
         os.replace(live, retired)
     except OSError:
@@ -280,11 +290,103 @@ def _install_exe(info):
         _quiet_remove(incoming)
         raise UpdateError(f"Couldn't put the new version in place: {e}") from e
 
-    # The old copy has served its purpose. It can't be deleted while it is the
-    # running image, so this usually fails here and succeeds on the next start;
-    # either way exactly one exe ends up in the folder.
-    _quiet_remove(retired)
+    # It is out of the way now but still on disk, because it is this process's
+    # own image. Nothing can delete it until we exit, so queue it up.
+    globals()["_PENDING_DELETE"] = retired
     return [f"{os.path.basename(live)} -> {info.get('version', 'newest')}"], False
+
+
+def _retire_target(folder):
+    """Where to park the exe we are replacing.
+
+    Not next to the app if it can be helped. Two programs sitting side by side
+    reads as "the old version is still installed", and the point of updating in
+    place was to avoid exactly that. The data folder is ours and nobody browses
+    it, so it goes there.
+
+    The catch is that renaming a running program only works within one volume;
+    across drives Windows has to copy, and the file is locked against that. The
+    data folder is normally beside the exe, but it falls back to LocalAppData
+    when the app's folder isn't writable -- possibly a different drive. So when
+    the volumes differ, keep the old copy here and simply hide it.
+    """
+    def drive(path):
+        return os.path.splitdrive(os.path.abspath(path))[0].lower()
+
+    if drive(folder) == drive(CACHE):
+        try:
+            parked = os.path.join(CACHE, "retired")
+            os.makedirs(parked, exist_ok=True)
+            return os.path.join(parked, RETIRED_NAME)
+        except OSError:
+            pass
+    return os.path.join(folder, RETIRED_NAME)
+
+
+def _sweep_retired(folder):
+    """Clear out any previous-version.exe from either of its two homes."""
+    _quiet_remove(os.path.join(folder, RETIRED_NAME))
+    _quiet_remove(os.path.join(CACHE, "retired", RETIRED_NAME))
+
+
+def finish_cleanup():
+    """Arrange for the replaced exe to be gone once this process has.
+
+    Called on the way out. Until now the old copy has been unkillable -- it is
+    the image this very process is running from -- which is why it used to
+    survive until the next launch. A small script started here outlives us by a
+    few seconds and does what we can't.
+
+    Safe to call when no update happened; it does nothing.
+    """
+    target = _PENDING_DELETE
+    if not target or not os.path.exists(target):
+        return
+    globals()["_PENDING_DELETE"] = None
+    _delete_when_free(target)
+
+
+def _delete_when_free(target):
+    """Leave a script that keeps trying the delete until it works.
+
+    No need to check whether we have exited: the delete simply fails while the
+    file is still a running image and succeeds the moment it isn't. Trying is
+    the wait.
+
+    It lives in the temp folder rather than beside the app -- swapping one bit
+    of visible litter for another would miss the point -- and removes itself
+    when it's done.
+    """
+    if sys.platform != "win32":
+        _quiet_remove(target)
+        return
+    body = f"""@echo off
+rem Written by {paths.APP_NAME} to delete the version it replaced.
+setlocal
+set tries=0
+:retry
+del /f /q "{target}" >nul 2>&1
+if not exist "{target}" goto done
+set /a tries+=1
+if %tries% GEQ 40 goto done
+ping -n 2 127.0.0.1 >nul
+goto retry
+:done
+del "%~f0"
+"""
+    try:
+        script = os.path.join(tempfile.gettempdir(), "market-routes-tidy.cmd")
+        with open(script, "w", encoding="ascii", errors="replace") as fh:
+            fh.write(body)
+        subprocess.Popen(["cmd", "/c", script],
+                         cwd=tempfile.gettempdir(),
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                         | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                         close_fds=True)
+    except (OSError, ValueError):
+        # Not worth telling anyone about on the way out the door. The startup
+        # sweep will catch it next time instead.
+        pass
 
 
 def _finish_on_exit(live, incoming):
@@ -379,17 +481,22 @@ def _quiet_remove(path):
 def tidy_after_restart():
     """Clear anything an update left behind. Called once at startup.
 
-    The replaced exe can't delete itself while it is running, so it lingers
-    until the next launch at the latest. This makes sure the folder settles
-    back to a single file rather than accumulating old versions -- every
-    previous build is still downloadable from the Releases page.
+    The delete normally happens as the old version closes. This is the backstop
+    for when it couldn't -- a crash instead of a clean exit, or antivirus
+    stopping the script from running -- so the folder can't accumulate old
+    versions either way. Every previous build is still on the Releases page if
+    one is ever needed back.
     """
     if not paths.FROZEN:
         return
     folder = os.path.dirname(os.path.abspath(sys.executable))
-    for leftover in ("previous-version.exe", "update-incoming.exe",
-                     "finish-update.cmd"):
+    for leftover in (RETIRED_NAME, "update-incoming.exe", "finish-update.cmd"):
         _quiet_remove(os.path.join(folder, leftover))
+    _quiet_remove(os.path.join(CACHE, "retired", RETIRED_NAME))
+    try:
+        os.rmdir(os.path.join(CACHE, "retired"))
+    except OSError:
+        pass
 
 
 def restore():

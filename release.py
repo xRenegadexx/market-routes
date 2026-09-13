@@ -3,8 +3,13 @@
 Cut a release: bump the version, build the exe, commit, push, publish.
 
     python release.py 1.8.2 "Fixed the thing"
+    python release.py 1.8.2 "Fixed the thing" --notes "- Fixed X
+- Added Y"
 
 That is the whole job. Testers press Check for updates and get it.
+
+Release notes are read on a phone-sized card next to a download button, so
+write bullets, one per change, and let the commit carry any reasoning.
 
 Each step is checked before the next one runs, and nothing is pushed until the
 build has actually succeeded -- so a failed build leaves the repo untouched
@@ -64,7 +69,10 @@ def main():
     ap = argparse.ArgumentParser(description="Build and publish a release.")
     ap.add_argument("version", help="e.g. 1.8.2 -- three numbers, no 'v'")
     ap.add_argument("message", help="what changed, in a few words")
-    ap.add_argument("--notes", default=None, help="longer release notes")
+    ap.add_argument("--notes", default=None,
+                    help="release notes -- bullets, one line per change, "
+                         "e.g. \"- Fixed X\n- Added Y\". Keep them to what "
+                         "changed; nobody reads a paragraph on a release page")
     args = ap.parse_args()
 
     version = args.version.lstrip("vV")

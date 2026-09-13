@@ -2169,10 +2169,11 @@ class App(tk.Tk):
         version = info.get("version", info.get("short", "?"))
         if info.get("mode") == "exe":
             question = (f"Replace this app with version {version} from "
-                        f"{info['slug']}?\n\nThe version you have now is kept "
-                        f"beside it as previous-version.exe, so you can rename "
-                        f"it back if the new one misbehaves. You'll need to "
-                        f"restart afterwards.")
+                        f"{info['slug']}?\n\nIt updates in place rather than "
+                        f"leaving a second copy behind. Every earlier build "
+                        f"stays downloadable from the releases page if you "
+                        f"ever want one back. You'll need to restart "
+                        f"afterwards.")
         else:
             question = (f"Replace this app's files with {version} from "
                         f"{info['slug']}?\n\nThe current files are copied to the "
@@ -2204,9 +2205,9 @@ class App(tk.Tk):
         messagebox.showinfo(
             "Update installed",
             "Replaced: " + ", ".join(changed) +
-            "\n\nClose and reopen the app to run it. Your scans, shopping list "
-            "and settings are untouched, and the old version is cleaned up "
-            "automatically.")
+            "\n\nClose and reopen the app to run it. Your scans, shopping "
+            "list and settings are untouched. The version it replaced is "
+            "removed as soon as you close the app.")
 
     # -- item detail -------------------------------------------------------
 
@@ -3069,6 +3070,14 @@ class App(tk.Tk):
         store.save_settings(self.settings)
         store.save_basket(self.basket)
         store.save_positions(self.positions)
+        # If an update ran this session, the version it replaced is still on
+        # disk because a program can't delete the file it is running from.
+        # Hand that off to something that outlives us. Never let it stop the
+        # window from closing.
+        try:
+            update.finish_cleanup()
+        except Exception:
+            pass
         self.destroy()
 
 
