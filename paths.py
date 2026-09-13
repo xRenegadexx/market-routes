@@ -19,7 +19,7 @@ APP_NAME = "FFXIV Market Routes"
 # Bump on every release. It shows in About and the window title, and is written
 # into error.log -- so a crash report from someone else says which build it came
 # from, which is the whole point of having it.
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 # Where "Check for updates" looks. This is compiled into every build, which is
 # how a tester's exe knows where to find new versions -- they have no git clone
