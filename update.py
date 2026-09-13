@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -41,7 +42,7 @@ CONFIG = os.path.join(HERE, "config.json")
 
 # The files a source install is allowed to replace.
 TRACKED = ["app.py", "engine.py", "store.py", "paths.py", "update.py",
-           "make_icon.py", "run.bat", "README.md"]
+           "make_icon.py", "README.md"]
 
 UA = {"User-Agent": "ffxiv-arb-updater/1.0", "Accept": "application/vnd.github+json"}
 TIMEOUT = 30
@@ -218,19 +219,31 @@ def _download_file(slug, sha, name):
 
 
 def install(info):
-    """Apply an update. Returns a short description of what changed."""
+    """Apply an update.
+
+    Returns (changed, pending). `pending` means the swap happens when the app
+    closes, so the caller must say so rather than claiming it is done.
+    """
     if info.get("mode") == "exe":
         return _install_exe(info)
-    return _install_source(info)
+    return _install_source(info), False
 
 
 def _install_exe(info):
     """Swap the running exe for the newly downloaded one.
 
-    Windows refuses to overwrite a running executable but allows renaming it,
-    so the live file is moved aside and the download takes its place. If
-    anything fails partway the original name is restored, so a failed update
-    leaves a working app rather than none.
+    Two mechanisms, because the neat one is not always allowed. Windows will
+    usually let a running program be renamed, and when it does the swap is
+    instant. But antivirus and Controlled Folder Access both block that rename,
+    and Downloads is a common place for it to be blocked -- seen in practice as
+    "Access is denied" after the download had already succeeded.
+
+    So when the rename is refused we fall back to leaving a small script that
+    waits for this process to exit, puts the new file in place and relaunches.
+    Slower, but it works wherever the folder is writable at all.
+
+    Returns (changed, pending) -- pending is True when a restart is required to
+    finish the job.
     """
     url = info.get("url") or ""
     blob = _get(url, hosts=ASSET_HOSTS, binary=True)
@@ -247,30 +260,80 @@ def _install_exe(info):
         with open(incoming, "wb") as fh:
             fh.write(blob)
     except OSError as e:
-        raise UpdateError(f"Couldn't write the new version: {e}") from e
-
-    try:
-        if os.path.exists(retired):
-            os.remove(retired)
-    except OSError:
-        pass
-
-    try:
-        os.replace(live, retired)      # allowed even while running
-    except OSError as e:
-        _quiet_remove(incoming)
         raise UpdateError(
-            f"Couldn't move the current version aside: {e}. If the app is in a "
-            f"folder you can't write to, move it somewhere like your Desktop "
-            f"and try again.") from e
+            f"Couldn't write the new version next to the app: {e}\n\n"
+            f"Move the app somewhere you can write to -- your Desktop is "
+            f"fine -- and try again.") from e
+
+    _quiet_remove(retired)
+
+    # The fast path: rename the running image aside and take its name.
+    try:
+        os.replace(live, retired)
+    except OSError:
+        return _finish_on_exit(live, incoming), True
 
     try:
         os.replace(incoming, live)
     except OSError as e:
         os.replace(retired, live)      # put things back exactly as they were
+        _quiet_remove(incoming)
         raise UpdateError(f"Couldn't put the new version in place: {e}") from e
 
-    return [f"{os.path.basename(live)} -> {info.get('version', 'newest')}"]
+    # The old copy has served its purpose. It can't be deleted while it is the
+    # running image, so this usually fails here and succeeds on the next start;
+    # either way exactly one exe ends up in the folder.
+    _quiet_remove(retired)
+    return [f"{os.path.basename(live)} -> {info.get('version', 'newest')}"], False
+
+
+def _finish_on_exit(live, incoming):
+    """Leave a script that completes the swap once this process has gone.
+
+    It simply retries the move until it succeeds, which it will the moment the
+    exe is no longer running, then relaunches and deletes itself.
+    """
+    folder = os.path.dirname(live)
+    script = os.path.join(folder, "finish-update.cmd")
+    body = f"""@echo off
+rem Written by the app to finish an update it could not apply while running.
+setlocal
+set tries=0
+:retry
+set /a tries+=1
+move /Y "{incoming}" "{live}" >nul 2>&1
+if not errorlevel 1 goto done
+if %tries% GEQ 60 goto giveup
+ping -n 2 127.0.0.1 >nul
+goto retry
+:done
+start "" "{live}"
+goto cleanup
+:giveup
+rem Could not replace it in two minutes; leave the download for the user.
+:cleanup
+del "%~f0"
+"""
+    try:
+        with open(script, "w", encoding="ascii", errors="replace") as fh:
+            fh.write(body)
+    except OSError as e:
+        _quiet_remove(incoming)
+        raise UpdateError(
+            f"This folder won't allow the app to replace itself ({e}).\n\n"
+            f"Move it somewhere like your Desktop and try again.") from e
+
+    try:
+        subprocess.Popen(["cmd", "/c", script], cwd=folder,
+                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                         | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                         close_fds=True)
+    except OSError as e:
+        _quiet_remove(script)
+        _quiet_remove(incoming)
+        raise UpdateError(f"Couldn't start the installer step: {e}") from e
+
+    return [os.path.basename(live)]
 
 
 def _install_source(info):
@@ -314,15 +377,18 @@ def _quiet_remove(path):
 
 
 def tidy_after_restart():
-    """Delete the version we replaced. Called once at startup.
+    """Clear anything an update left behind. Called once at startup.
 
-    Kept until now on purpose: while it exists you can rename it back by hand
-    if a new build turns out to be broken.
+    The replaced exe can't delete itself while it is running, so it lingers
+    until the next launch at the latest. This makes sure the folder settles
+    back to a single file rather than accumulating old versions -- every
+    previous build is still downloadable from the Releases page.
     """
     if not paths.FROZEN:
         return
     folder = os.path.dirname(os.path.abspath(sys.executable))
-    for leftover in ("previous-version.exe", "update-incoming.exe"):
+    for leftover in ("previous-version.exe", "update-incoming.exe",
+                     "finish-update.cmd"):
         _quiet_remove(os.path.join(folder, leftover))
 
 

@@ -2131,18 +2131,33 @@ class App(tk.Tk):
         if not messagebox.askyesno("Install update", question):
             return
         try:
-            changed = update.install(info)
+            changed, pending = update.install(info)
         except update.UpdateError as exc:
             self.status.set("Update failed.")
             self.show_banner(str(exc), self.check_update, "Try again")
             return
         self.hide_banner()
+        if pending:
+            # The swap can't happen while we're running, so it's queued for the
+            # moment we exit. Offer to do that now rather than leaving someone
+            # to wonder why the version didn't change.
+            self.status.set("Downloaded — closing the app will finish it.")
+            question = "\n\n".join([
+                "The new version is downloaded, but this folder won't let the "
+                "app replace itself while it is running.",
+                "Close now to finish installing? It will reopen on the new "
+                "version by itself.",
+            ])
+            if messagebox.askyesno("Nearly done", question):
+                self.on_close()
+            return
         self.status.set("Updated — restart to run the new version.")
         messagebox.showinfo(
             "Update installed",
             "Replaced: " + ", ".join(changed) +
             "\n\nClose and reopen the app to run it. Your scans, shopping list "
-            "and settings are untouched.")
+            "and settings are untouched, and the old version is cleaned up "
+            "automatically.")
 
     # -- item detail -------------------------------------------------------
 
