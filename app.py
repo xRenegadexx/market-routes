@@ -76,6 +76,8 @@ def apply_theme(theme):
 
 apply_theme(store.load_theme())
 
+DPI_MODE = "unknown"   # set by enable_hidpi(), shown in About
+
 TIER_ORDER = ["big", "bulk", "rev"]
 TAB_NAMES = ["Big ticket", "Bulk & consumables", "Materia → NA",
              "My listings", "Look up an item", "Shopping list"]
@@ -154,31 +156,58 @@ def fmt(kind, v):
 
 
 def enable_hidpi():
-    """Stop Windows bitmap-scaling the window on a high-DPI display.
+    """Declare how this process handles displays of differing DPI.
 
-    Without this a 4K monitor at 150% or 200% scaling renders the app at 96 DPI
-    and then stretches the result, which is why text looks soft. Declaring the
-    process DPI-aware means Tk draws at the real pixel size instead. Returns the
-    display scale so fonts and row heights can be sized to match.
+    Three levels, best first, because which is available depends on the Windows
+    build:
+
+      Per-monitor v2  what we want. Windows reports the DPI of whichever
+                      monitor a window is on, scales non-client areas like the
+                      title bar for us, and tells the window when it moves
+                      between displays.
+      Per-monitor v1  the older flag. Stops Windows bitmap-scaling us, but
+                      GetDpiForWindow can keep answering with the DPI the
+                      process started on -- which shows up as the window
+                      staying visually "zoomed in" after being dragged to a
+                      lower-scale monitor, because nothing ever tells us the
+                      scale changed.
+      System aware    last resort: crisp on the primary display, bitmap-scaled
+                      (soft, but correctly sized) everywhere else.
+
+    Returns the scale of the display the process starts on.
     """
-    scale = 1.0
-    if sys.platform == "win32":
+    if sys.platform != "win32":
+        return 1.0
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        level = None
         try:
-            import ctypes
-            # PROCESS_PER_MONITOR_DPI_AWARE (2) where available; the older
-            # system-wide call is the fallback on Windows 8 and earlier.
+            # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4
+            if user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                level = "per-monitor v2"
+        except (AttributeError, OSError):
+            pass
+        if level is None:
             try:
                 ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                level = "per-monitor v1"
             except (AttributeError, OSError):
-                ctypes.windll.user32.SetProcessDPIAware()
-            dc = ctypes.windll.user32.GetDC(0)
-            try:
-                # LOGPIXELSX = 88; 96 DPI is the unscaled baseline.
-                scale = ctypes.windll.gdi32.GetDeviceCaps(dc, 88) / 96.0
-            finally:
-                ctypes.windll.user32.ReleaseDC(0, dc)
-        except Exception:
-            scale = 1.0
+                try:
+                    user32.SetProcessDPIAware()
+                    level = "system aware"
+                except (AttributeError, OSError):
+                    level = "none"
+        globals()["DPI_MODE"] = level
+
+        dc = user32.GetDC(0)
+        try:
+            scale = ctypes.windll.gdi32.GetDeviceCaps(dc, 88) / 96.0  # LOGPIXELSX
+        finally:
+            user32.ReleaseDC(0, dc)
+    except Exception:
+        globals()["DPI_MODE"] = "unknown"
+        return 1.0
     return scale if 0.5 <= scale <= 4.0 else 1.0
 
 
@@ -293,8 +322,27 @@ class App(tk.Tk):
         self.tk.call("tk", "scaling", self.scale * 1.3333)
         self._style()                       # row heights, fonts, the palette
         self._resize_columns()
+        self._fit_to_screen()
         self.status.set(f"Display scale changed ({old:.2f} to {found:.2f}) — "
                         f"resized to match this monitor.")
+
+    def _fit_to_screen(self):
+        """Shrink the window if it is now wider or taller than the display.
+
+        A window sized for a 4K monitor is bigger than a 1080p screen, so after
+        moving there its edges can sit off the display with no way to grab them.
+        """
+        try:
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            width = min(self.winfo_width(), screen_w - self.px(40))
+            height = min(self.winfo_height(), screen_h - self.px(80))
+            if width < self.winfo_width() or height < self.winfo_height():
+                x = max(0, min(self.winfo_x(), screen_w - width))
+                y = max(0, min(self.winfo_y(), screen_h - height))
+                self.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
+        except tk.TclError:
+            pass
 
     def _resize_columns(self):
         """Column widths are raw pixels, so they need redoing by hand."""
@@ -452,6 +500,7 @@ class App(tk.Tk):
             f"FFXIV Market Routes {paths.VERSION}\n"
             f"{'built as an .exe' if paths.FROZEN else 'running from source'}"
             f" · Python {sys.version.split()[0]}\n"
+            f"Display: {self.scale:.2f}x scaling, {DPI_MODE}\n"
             f"Data folder: {paths.DATA_DIR}\n\n"
             "Finds items worth buying on one side of the Materia / North America "
             "divide and selling on the other.\n\n"
