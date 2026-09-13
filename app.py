@@ -100,6 +100,18 @@ COLUMNS = [
     ("nau",  "Stock",             62, "e", "int"),
 ]
 
+# Column widths for the tables that aren't built from COLUMNS, so a monitor
+# change can re-apply them at the new scale.
+BASKET_WIDTHS = (("what", 300), ("q", 34), ("qty", 60), ("buy", 90),
+                 ("spend", 110), ("sell", 90), ("profit", 90), ("gain", 110),
+                 ("world", 120))
+POSITION_WIDTHS = (("name", 250), ("q", 34), ("world", 110), ("price", 100),
+                   ("qty", 60), ("low", 100), ("under", 80), ("state", 200),
+                   ("when", 90))
+LOOKUP_WIDTHS = (("region", 120), ("world", 110), ("q", 34), ("buy", 105),
+                 ("units", 75), ("sell", 100), ("rate", 85), ("sold", 60),
+                 ("net", 95), ("margin", 70))
+
 BLURB = {
     "big": "Items netting 20,000 gil or more per unit, bought anywhere in North "
            "America. They pay well per sale but move slowly — read “sells in” "
@@ -170,6 +182,30 @@ def enable_hidpi():
     return scale if 0.5 <= scale <= 4.0 else 1.0
 
 
+def window_scale(widget, fallback=1.0):
+    """DPI scale of the monitor this window is currently on.
+
+    enable_hidpi() declares the process per-monitor DPI aware, which stops
+    Windows bitmap-scaling us -- crisp on a 4K display, but it also means
+    nothing is rescaled for us when the window is dragged to a monitor at a
+    different scale. So we have to ask, per window, and redo the sizing.
+    """
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import ctypes
+        hwnd = int(widget.winfo_id())
+        # GetDpiForWindow is Windows 10 1607+ and returns the DPI of the
+        # monitor the window is on, which is exactly the question.
+        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
+        if dpi:
+            scale = dpi / 96.0
+            return scale if 0.5 <= scale <= 4.0 else fallback
+    except Exception:
+        pass
+    return fallback
+
+
 def age_text(hours):
     if hours is None:
         return "no data yet"
@@ -230,9 +266,54 @@ class App(tk.Tk):
         self._style()
         self._build()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Dragging between monitors of different scale needs a re-layout; Tk
+        # will not do it for us once we are per-monitor DPI aware.
+        self._rescale_job = None
+        self.bind("<Configure>", self._maybe_rescale)
         self.after(80, self._pump)
         self._load_cache()
         self.after(2000, self._auto_tick)
+
+    def _maybe_rescale(self, event=None):
+        """Debounced: a drag fires <Configure> continuously."""
+        if event is not None and event.widget is not self:
+            return
+        if self._rescale_job is not None:
+            self.after_cancel(self._rescale_job)
+        self._rescale_job = self.after(220, self._apply_monitor_scale)
+
+    def _apply_monitor_scale(self):
+        self._rescale_job = None
+        found = window_scale(self, self.scale)
+        # A tenth of a step is the smallest change worth a full re-layout;
+        # below that it is just noise from rounding.
+        if abs(found - self.scale) < 0.05:
+            return
+        old, self.scale = self.scale, found
+        self.tk.call("tk", "scaling", self.scale * 1.3333)
+        self._style()                       # row heights, fonts, the palette
+        self._resize_columns()
+        self.status.set(f"Display scale changed ({old:.2f} to {found:.2f}) — "
+                        f"resized to match this monitor.")
+
+    def _resize_columns(self):
+        """Column widths are raw pixels, so they need redoing by hand."""
+        for tier, tree in self.trees.items():
+            for key, _label, width, _anchor, _kind in COLUMNS:
+                try:
+                    tree.column(key, width=self.px(width))
+                except tk.TclError:
+                    pass
+        for tree, widths in ((getattr(self, "basket_tree", None), BASKET_WIDTHS),
+                             (getattr(self, "positions_tree", None), POSITION_WIDTHS),
+                             (getattr(self, "find_tree", None), LOOKUP_WIDTHS)):
+            if tree is None:
+                continue
+            for key, width in widths:
+                try:
+                    tree.column(key, width=self.px(width))
+                except tk.TclError:
+                    pass
 
     # -- chrome ------------------------------------------------------------
 
