@@ -273,6 +273,10 @@ class App(tk.Tk):
         if store.migrate_positions(self.positions):
             store.save_positions(self.positions)
         self.name_index = engine.load_name_index()
+        # One automatic attempt per session; see _auto_index.
+        self.index_tried = False
+        # What someone asked for while the index was still building.
+        self.pending_lookup = None
         self.theme = store.load_theme()
         self.swatches = {}
         self.found = []
@@ -1146,8 +1150,7 @@ class App(tk.Tk):
         """Drop a list of matching item names under the box as you type."""
         self.found = self._matches_for(self.find_var.get())
         if not self.name_index:
-            self.find_note.configure(
-                text="press Look up to build the item index first (about a minute)")
+            self.find_note.configure(text=self._index_note())
             self._hide_suggest()
             return
         typed = self.find_var.get().strip()
@@ -1236,8 +1239,7 @@ class App(tk.Tk):
     def _refresh_matches(self):
         self.found = self._matches_for(self.find_var.get())
         if not self.name_index:
-            self.find_note.configure(
-                text="press Look up to build the item index first (about a minute)")
+            self.find_note.configure(text=self._index_note())
         else:
             self.find_note.configure(text=f"{len(self.name_index):,} items indexed")
 
@@ -1246,6 +1248,9 @@ class App(tk.Tk):
             self.status.set("Already busy — let the current job finish first.")
             return
         if not self.name_index:
+            # Build first, then do what they actually pressed the button for.
+            self.pending_lookup = self.find_var.get().strip()
+            self.index_tried = True
             self._build_index()
             return
         typed = self.find_var.get().strip()
@@ -1277,6 +1282,32 @@ class App(tk.Tk):
         self.job = "lookup"
         self.worker = threading.Thread(target=work, daemon=True)
         self.worker.start()
+
+    def _auto_index(self):
+        """Start building the item index as soon as the tab is opened.
+
+        Opening this tab is the only reason to want the index, and wanting it
+        is the only thing a person can tell us -- so the click that gets them
+        here is a clear enough signal. It is one pass over the item sheet,
+        about a minute, and never again on this machine.
+
+        Once per session. A failure here is nearly always the network being
+        down, and retrying on every click between tabs would be noise.
+        """
+        if self.name_index or self.index_tried:
+            return
+        if self.worker and self.worker.is_alive():
+            # A scan is using the connection budget. Leave it alone and try
+            # again the next time this tab is opened.
+            return
+        self.index_tried = True
+        self._build_index()
+
+    def _index_note(self):
+        """What to say under the box while there is nothing to search."""
+        if self.job == "index" and self.worker and self.worker.is_alive():
+            return "building the item index — about a minute, once ever"
+        return "the item index isn't ready yet — press Look up to build it"
 
     def _build_index(self):
         self.status.set("Building the item index — about a minute, once only.")
@@ -1541,6 +1572,8 @@ class App(tk.Tk):
         idx = self.notebook.index(self.notebook.select())
         if TAB_NAMES[idx] == "My listings":
             self._auto_find_mine()
+        if TAB_NAMES[idx] == "Look up an item":
+            self._auto_index()
         if idx >= len(TIER_ORDER):
             self.sell_label.configure(text="SHOPPING LIST")
             for child in self.world_box.winfo_children():
@@ -1782,6 +1815,13 @@ class App(tk.Tk):
                     self._refresh_matches()
                     self.status.set(f"Indexed {len(payload):,} items — "
                                     f"search works instantly from now on.")
+                    # Someone pressed Look up before the index existed. Finish
+                    # the job rather than making them ask a second time.
+                    waiting, self.pending_lookup = self.pending_lookup, None
+                    if waiting:
+                        self.find_var.set(waiting)
+                        self._refresh_matches()
+                        self.run_lookup()
                 elif kind == "lookupfail":
                     self._hide_progress()
                     self.status.set("Lookup failed.")
