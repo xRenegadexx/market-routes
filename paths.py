@@ -25,7 +25,7 @@ VERSION = "1.7.1"
 # how a tester's exe knows where to find new versions -- they have no git clone
 # and no config file to read. A config.json next to the app overrides it, which
 # is handy for testing against a fork.
-REPO = "xRenegadexx/ffxiv-market-routes"
+REPO = "xRenegadexx/market-routes"
 
 
 def _writable(directory):

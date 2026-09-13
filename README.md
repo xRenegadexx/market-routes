@@ -229,7 +229,7 @@ are never touched by an update.
 
 ## Putting it on GitHub the first time
 
-**1. Make the repository.** <https://github.com/new>, named `ffxiv-market-routes`,
+**1. Make the repository.** <https://github.com/new>, named `market-routes`,
 **Public**, and don't tick "Add a README" — this folder has one.
 
 > Public matters: reading a private repo needs an access token, which this tool
@@ -238,7 +238,7 @@ are never touched by an update.
 **2. Push.**
 
 ```bash
-git remote add origin https://github.com/xRenegadexx/ffxiv-market-routes.git
+git remote add origin https://github.com/xRenegadexx/market-routes.git
 git branch -M main
 git push -u origin main
 ```
