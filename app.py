@@ -1719,6 +1719,8 @@ class App(tk.Tk):
                 elif kind == "rowdone":
                     self._hide_progress()
                     self._row_refreshed(*payload)
+                elif kind == "board":
+                    self._show_board(*payload)
                 elif kind == "swept":
                     self._hide_progress()
                     self._swept(*payload)
@@ -2496,9 +2498,12 @@ class App(tk.Tk):
         tree.tag_configure("odd", background=PANEL_2)
         tree.tag_configure("bad", foreground=WARN)
         tree.tag_configure("good", foreground=GOOD)
+        tree.bind("<Double-1>", lambda e: self.show_board_detail())
+        tree.bind("<Return>", lambda e: self.show_board_detail())
         tree.pack(fill="both", expand=True)
         self.positions_tree = tree
         self.position_keys = {}
+        self.listing_boards = {}
 
     def draw_positions(self):
         """Group by board, with each stack shown as its own listing under it.
@@ -2510,6 +2515,7 @@ class App(tk.Tk):
         tree = self.positions_tree
         tree.delete(*tree.get_children())
         self.position_keys = {}
+        self.listing_boards = {}
 
         for board, rows in self._discovered_boards().items():
             name, quality, world = board
@@ -2526,6 +2532,9 @@ class App(tk.Tk):
                 tags=("group",) if best == 1 else ("group", "bad"),
                 values=(f"{name}  ({len(rows)} listings)", quality, world, "",
                         f"{units:,}", "", f"{under:,}", summary, "from the scan"))
+            board = {"id": rows[0].get("id"), "name": name, "q": quality,
+                     "world": world}
+            self.listing_boards[parent] = board
             for i, r in enumerate(rows):
                 tags = ["odd"] if i % 2 else []
                 tags.append("good" if r["position"] == 1 else "bad")
@@ -2538,9 +2547,11 @@ class App(tk.Tk):
                     where = (f"{r.get('sellers_under', 0)} other seller"
                              f"{'' if r.get('sellers_under') == 1 else 's'} "
                              f"cheaper, of {others}")
-                tree.insert(parent, "end", tags=tags, values=(
+                node = tree.insert(parent, "end", tags=tags, values=(
                     f"    {r['retainer']}", "", "", f"{r['price']:,}",
                     f"{r['qty']:,}", "", f"{r['under']:,}", where, ""))
+                self.listing_boards[node] = dict(board, price=r["price"],
+                                                 retainer=r["retainer"])
 
         groups = store.positions_by_board(self.positions)
         order = sorted(groups.items(),
@@ -2562,6 +2573,10 @@ class App(tk.Tk):
                         first.get("q", ""), first.get("world", "?"), "",
                         f"{units:,}", f"{low:,}" if low else "—", "",
                         summary, ""))
+            manual_board = {"id": first.get("id"), "name": first.get("name", "?"),
+                            "q": first.get("q", "NQ"),
+                            "world": first.get("world", "")}
+            self.listing_boards[parent] = manual_board
             for i, (key, pos) in enumerate(rows):
                 tags = ["odd"] if i % 2 else []
                 if pos.get("state") == "undercut":
@@ -2579,6 +2594,8 @@ class App(tk.Tk):
                     pos.get("note", "not checked yet"),
                     (fmt("dur", days) + " ago") if days is not None else "—"))
                 self.position_keys[node] = key
+                self.listing_boards[node] = dict(manual_board,
+                                                 price=pos.get("price"))
 
     def _auto_find_mine(self, announce=False):
         """Populate discovered listings silently when we can.
@@ -2694,6 +2711,179 @@ class App(tk.Tk):
         for rows in out.values():
             rows.sort(key=lambda r: r["price"] or 0)
         return dict(sorted(out.items()))
+
+    def show_board_detail(self):
+        """Open the live board behind a listing row.
+
+        Knowing you have been undercut is half an answer; the useful half is by
+        how much, and by whom. This reads the board fresh rather than using the
+        scan, because a listing you are watching is exactly the case where
+        minutes-old numbers are not good enough.
+        """
+        sel = self.positions_tree.selection()
+        if not sel:
+            return
+        board = self.listing_boards.get(sel[0])
+        if not board or not board.get("id") or not board.get("world"):
+            self.status.set("That row has no board attached — it was saved by "
+                            "an older version. Press Find my listings again.")
+            return
+        if self.worker and self.worker.is_alive():
+            self.status.set("Already busy — let the current job finish first.")
+            return
+
+        self.status.set(f"Reading {board['name']} on {board['world']}…")
+
+        def work():
+            try:
+                listings, history = engine.read_board(
+                    board["id"], board["q"], board["world"])
+                self.queue.put(("board", (board, listings, history), None))
+            except Exception as exc:
+                self.queue.put(("lookupfail", str(exc), None))
+
+        self.stop_flag.clear()
+        self.job = "board"
+        self.worker = threading.Thread(target=work, daemon=True)
+        self.worker.start()
+
+    def _show_board(self, board, listings, history):
+        yours = store.retainers_on(self.settings.get("retainers"), board["world"])
+        mine = [l for l in listings
+                if str(l.get("retainerName") or "").lower() in yours]
+        others = [l for l in listings
+                  if str(l.get("retainerName") or "").lower() not in yours]
+        my_price = board.get("price") or (mine[0]["pricePerUnit"] if mine else None)
+        cheapest_other = others[0]["pricePerUnit"] if others else None
+
+        win = tk.Toplevel(self)
+        win.title(f"{board['name']} - {board['world']}")
+        win.configure(bg=BG)
+        win.geometry(f"{self.px(780)}x{self.px(660)}")
+        win.transient(self)
+
+        head = ttk.Frame(win)
+        head.pack(fill="x", padx=18, pady=(16, 0))
+        ttk.Label(head, text=board["name"], style="Head.TLabel").pack(anchor="w")
+        ttk.Label(head, style="Dim.TLabel",
+                  text=f"{board['q']} · {board['world']} · read just now"
+                  ).pack(anchor="w", pady=(2, 0))
+
+        # The headline: the gap, in gil and percent.
+        facts = ttk.Frame(win, style="Panel.TFrame")
+        facts.pack(fill="x", padx=18, pady=(14, 0))
+        if my_price and cheapest_other is not None and cheapest_other < my_price:
+            gap = my_price - cheapest_other
+            pct = round(gap / my_price * 100)
+            beaten = sum(l["quantity"] for l in others
+                         if l["pricePerUnit"] < my_price)
+            verdict = ("UNDERCUT BY", f"{gap:,}",
+                       f"{pct}% under your {my_price:,} · {beaten:,} units cheaper")
+        elif my_price and cheapest_other is not None:
+            lead = cheapest_other - my_price
+            verdict = ("YOU ARE CHEAPEST", f"{lead:,}",
+                       f"clear of the next seller at {cheapest_other:,}")
+        elif my_price:
+            verdict = ("NO COMPETITION", "—",
+                       "nobody else is listing this here")
+        else:
+            verdict = ("YOUR PRICE", "unknown",
+                       "no listing of yours found on this board")
+        cells = (verdict,
+                 ("CHEAPEST HERE",
+                  f"{listings[0]['pricePerUnit']:,}" if listings else "—",
+                  f"{len(listings)} listings, "
+                  f"{sum(l['quantity'] for l in listings):,} units"),
+                 ("YOURS ON THIS BOARD", f"{len(mine)}",
+                  f"{sum(l['quantity'] for l in mine):,} units"
+                  if mine else "none found"))
+        for i, (k, v, note) in enumerate(cells):
+            cell = ttk.Frame(facts, style="Panel.TFrame")
+            cell.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 1, 0))
+            facts.columnconfigure(i, weight=1, uniform="bfacts")
+            ttk.Label(cell, text=k, style="Key.TLabel").pack(anchor="w", padx=12,
+                                                             pady=(10, 1))
+            style = ("ValWarn.TLabel" if k == "UNDERCUT BY" else "Val.TLabel")
+            ttk.Label(cell, text=v, style=style).pack(anchor="w", padx=12)
+            ttk.Label(cell, text=note, style="Note.TLabel",
+                      wraplength=self.px(210)).pack(anchor="w", padx=12,
+                                                    pady=(1, 10))
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=18, pady=(14, 0))
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="both", expand=True, padx=(0, 9))
+        ttk.Label(left, text="EVERY LISTING, CHEAPEST FIRST",
+                  style="Dim.TLabel").pack(anchor="w")
+        wtree = ttk.Treeview(left, columns=("p", "q", "r"), show="headings",
+                             height=12)
+        for key, label, width, anchor_ in (("p", "Price", 100, "e"),
+                                           ("q", "Qty", 50, "e"),
+                                           ("r", "Retainer", 150, "w")):
+            wtree.heading(key, text=label)
+            wtree.column(key, width=self.px(width), anchor=anchor_)
+        wtree.tag_configure("odd", background=PANEL_2)
+        wtree.tag_configure("picked", foreground=GOLD)
+        wtree.tag_configure("under", foreground=WARN)
+        for i, l in enumerate(listings[:40]):
+            who = str(l.get("retainerName") or "")
+            is_mine = who.lower() in yours
+            tags = ["odd"] if i % 2 else []
+            if is_mine:
+                tags.append("picked")
+            elif my_price and l["pricePerUnit"] < my_price:
+                tags.append("under")
+            wtree.insert("", "end", tags=tags,
+                         values=(f"{l['pricePerUnit']:,}", f"{l['quantity']:,}",
+                                 (who + "  <- you") if is_mine else who))
+        wtree.pack(fill="both", expand=True, pady=(6, 0))
+        ttk.Label(left, style="Dim.TLabel", wraplength=self.px(330),
+                  justify="left",
+                  text="Gold is yours. Orange is priced below you — those are "
+                       "the ones that sell first."
+                  ).pack(anchor="w", pady=(6, 0))
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(9, 0))
+        ttk.Label(right, text="WHAT IT ACTUALLY SOLD FOR",
+                  style="Dim.TLabel").pack(anchor="w")
+        hist = [[h["pricePerUnit"], h["quantity"], h["timestamp"]]
+                for h in sorted(history, key=lambda x: -x["timestamp"])[:14]]
+        canvas = tk.Canvas(right, height=self.px(150), bg=PANEL,
+                           highlightthickness=0)
+        canvas.pack(fill="x", pady=(6, 0))
+        canvas.after(30, lambda: self._draw_history(canvas, hist, my_price or 0))
+        htree = ttk.Treeview(right, columns=("p", "q", "w"), show="headings",
+                             height=8)
+        for key, label, width in (("p", "Price", 100), ("q", "Qty", 50),
+                                  ("w", "When", 90)):
+            htree.heading(key, text=label)
+            htree.column(key, width=self.px(width),
+                         anchor="e" if key != "w" else "w")
+        htree.tag_configure("odd", background=PANEL_2)
+        for i, e in enumerate(hist):
+            ago = (time.time() - e[2]) / 86400
+            htree.insert("", "end", tags=("odd",) if i % 2 else (),
+                         values=(f"{e[0]:,}", f"{e[1]:,}",
+                                 fmt("dur", ago) + " ago"))
+        if not hist:
+            htree.insert("", "end", values=("no recorded sales", "", ""))
+        htree.pack(fill="both", expand=True, pady=(6, 0))
+
+        foot = ttk.Frame(win)
+        foot.pack(fill="x", padx=18, pady=14)
+        ttk.Button(foot, text="Close", command=win.destroy).pack(side="right")
+        ttk.Button(foot, text="Open on Universalis",
+                   command=lambda: webbrowser.open(
+                       "https://universalis.app/market/%d" % board["id"])).pack(
+                           side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda e: win.destroy())
+        self.status.set(
+            f"{board['name']} on {board['world']}: " +
+            (f"undercut by {my_price - cheapest_other:,}"
+             if my_price and cheapest_other is not None
+             and cheapest_other < my_price else "you are the cheapest"))
 
     def check_positions(self):
         """Re-read every board you have something on: discovered or recorded."""
