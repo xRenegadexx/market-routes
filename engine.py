@@ -1078,18 +1078,27 @@ def refresh_one(item_id, hq, meta, tier, geo, report=None, should_stop=None):
 
 
 def lookup_item(item_id, geo, report=None, should_stop=None):
-    """Price one item everywhere, both directions. Five requests, a few seconds."""
+    """Price one item on every world, both regions, both qualities.
+
+    Returns one row per world per quality rather than a list of routes. A route
+    is a conclusion; what you actually want to see first is the raw picture --
+    what it costs on each board and what it goes for there -- and then let the
+    best route fall out of that.
+    """
     report = report or (lambda m, f=None: None)
     F = Fetcher(report, should_stop or (lambda: False))
     scopes = list(geo["oce"]) + list(geo["na"])
+    region_of = {}
+    for dc in geo["oce"]:
+        region_of[dc] = "Materia"
+    for dc in geo["na"]:
+        region_of[dc] = "North America"
 
     def pull(scope):
         return scope, F.get(f"https://universalis.app/api/v2/{scope}/{item_id}"
                             f"?listings=100&entries=200")
 
     data = {}
-    # Five data centres, five requests -- well inside the connection cap, so do
-    # them at once rather than one after another.
     F.phase(0.0, 0.9)
     for scope, payload in F.map(pull, scopes, "Reading market boards"):
         if isinstance(payload, dict) and payload.get("listings") is not None:
@@ -1099,32 +1108,73 @@ def lookup_item(item_id, geo, report=None, should_stop=None):
 
     out = {}
     for quality, hq in (("HQ", True), ("NQ", False)):
-        for tier, spec in TIERS.items():
-            if tier == "bulk":
-                continue        # same direction as "big"; one row set is enough
-            buy = buy_side(data, item_id, hq, geo[spec["buy"]], geo["worlds_all"])
-            per = sell_side(data, item_id, hq, geo[spec["sell"]])
-            if not buy or not per:
+        rows = []
+        for scope in scopes:
+            payload = data.get(f"{scope}|{item_id}")
+            if not isinstance(payload, dict):
                 continue
-            rows = []
-            for wname, v in per.items():
-                profit = v["sell"] * TAX - buy["buy"]
+            worlds = (geo["oce"].get(scope) or geo["na"].get(scope) or {})
+            listings = clean(payload.get("listings"), hq)
+            history = clean(payload.get("recentHistory"), hq, need_time=True)
+            stamps = [h["timestamp"] for h in history]
+            window = max((max(stamps) - min(stamps)) / 86400.0, 0.5) if stamps else 0
+            dc_median = st.median([h["pricePerUnit"] for h in history]) if history else None
+
+            for wid, wname in worlds.items():
+                mine = sorted([l for l in listings if l.get("worldID") == wid],
+                              key=lambda l: l["pricePerUnit"])
+                sales = [h for h in history if h.get("worldID") == wid]
+                units = sum(l["quantity"] for l in mine)
+                sold = sum(h["quantity"] for h in sales)
+                prices = [h["pricePerUnit"] for h in sales]
+                # What you could realistically get here: undercut the board, but
+                # not above what it has actually been selling for.
+                refs = [p for p in (mine[0]["pricePerUnit"] if mine else None,
+                                    st.median(prices) if prices else None,
+                                    dc_median * PRICE_SANITY if dc_median else None)
+                        if p]
                 rows.append({
-                    "world": wname, "sell": v["sell"], "profit": round(profit),
-                    "margin": round(profit / buy["buy"] * 100) if buy["buy"] else 0,
-                    "ahead": v["ahead"], "listed": v["listed"],
-                    "rate": round(v["rate"], 2), "sold": v["sold"],
-                    "sales": v["sales"], "win": v["win"],
-                    "days": round(1 / v["rate"], 1) if v["rate"] > 0 else None,
-                    "wall": v["wall"], "hist": v["hist"],
+                    "world": wname,
+                    "dc": scope,
+                    "region": region_of.get(scope, "?"),
+                    "buy": mine[0]["pricePerUnit"] if mine else None,
+                    "units": units,
+                    "listings": len(mine),
+                    "sell": round(min(refs)) if refs else None,
+                    "sold": sold,
+                    "rate": round(sold / window, 2) if window else 0.0,
+                    "wall": [[l["pricePerUnit"], l["quantity"], l.get("r")]
+                             for l in mine[:10]],
+                    "hist": [[h["pricePerUnit"], h["quantity"], h["timestamp"]]
+                             for h in sorted(sales, key=lambda x: -x["timestamp"])[:14]],
                 })
-            rows.sort(key=lambda r: -r["profit"])
-            out.setdefault(quality, {})["rev" if tier == "rev" else "fwd"] = {
-                "buy": round(buy["buy"]), "stop": buy["stop"],
-                "stop_units": buy["stop_units"], "stock": buy["region_units"],
-                "rows": rows,
-            }
+
+        if not rows:
+            continue
+        priced = [r for r in rows if r["buy"] is not None]
+        cheapest = min(priced, key=lambda r: r["buy"]) if priced else None
+        sellable = [r for r in rows if r["sell"] is not None]
+        dearest = max(sellable, key=lambda r: r["sell"]) if sellable else None
+
+        # Net per unit if you bought at the cheapest board anywhere and sold here.
+        for r in rows:
+            if cheapest and r["sell"] is not None:
+                r["net"] = round(r["sell"] * TAX - cheapest["buy"])
+                r["margin"] = (round(r["net"] / cheapest["buy"] * 100)
+                               if cheapest["buy"] else 0)
+            else:
+                r["net"] = r["margin"] = None
+
+        rows.sort(key=lambda r: (r["region"], -(r["sell"] or 0)))
+        out[quality] = {
+            "rows": rows,
+            "cheapest": cheapest,
+            "dearest": dearest,
+            "best": max((r for r in rows if r["net"] is not None),
+                        key=lambda r: r["net"], default=None),
+        }
     return out
+
 
 # ----------------------------------------------------------------------------
 # Entry points

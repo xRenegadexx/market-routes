@@ -887,9 +887,11 @@ class App(tk.Tk):
             tree.tag_configure("loss", foreground=INK_3)
             tree.tag_configure("group", foreground=GOLD, background=PANEL_2)
         try:
-            self.match_list.configure(bg=PANEL, fg=INK_2,
-                                      selectbackground=_mix(PANEL, GOLD, 0.2),
-                                      selectforeground=GOLD)
+            if self.suggest_list is not None:
+                self.suggest_list.configure(
+                    bg=PANEL, fg=INK, highlightbackground=LINE,
+                    selectbackground=_mix(PANEL, GOLD, 0.25),
+                    selectforeground=GOLD)
         except (AttributeError, tk.TclError):
             pass
         self.banner.configure(style="Alert.TFrame")
@@ -934,84 +936,168 @@ class App(tk.Tk):
 
     def _search_tab(self, parent):
         ttk.Label(parent, style="Dim.TLabel", wraplength=1320, justify="left",
-                  text="Price a single item without scanning everything. A full "
-                       "scan reads 590 items and takes minutes; one item is five "
-                       "requests and a few seconds. Results cover every world on "
-                       "both sides, including the ones that lose money — nothing "
-                       "here is filtered."
+                  text="Price one item on every world in both regions, in a few "
+                       "seconds, with none of the filters the route tables apply "
+                       "— so an item being griefed or currently unprofitable "
+                       "still shows, which is exactly when you want to look."
                   ).pack(anchor="w", pady=(4, 8))
 
         bar = ttk.Frame(parent)
-        bar.pack(fill="x", pady=(0, 10))
+        bar.pack(fill="x", pady=(0, 4))
         ttk.Label(bar, text="ITEM", style="Dim.TLabel").pack(side="left", padx=(0, 8))
         self.find_var = tk.StringVar()
-        entry = ttk.Entry(bar, textvariable=self.find_var, width=34, font=self.f_body)
-        entry.pack(side="left")
-        entry.bind("<Return>", lambda e: self.run_lookup())
-        self.find_var.trace_add("write", lambda *_: self._refresh_matches())
+        self.find_entry = ttk.Entry(bar, textvariable=self.find_var, width=38,
+                                    font=self.f_body)
+        self.find_entry.pack(side="left")
+        self.find_entry.bind("<Down>", self._suggest_down)
+        self.find_entry.bind("<Up>", self._suggest_up)
+        self.find_entry.bind("<Return>", self._suggest_take)
+        self.find_entry.bind("<Escape>", lambda e: self._hide_suggest())
+        self.find_entry.bind("<FocusOut>",
+                             lambda e: self.after(150, self._hide_suggest))
+        self.find_var.trace_add("write", lambda *_: self._suggest())
         self.find_btn = ttk.Button(bar, text="Look up prices", style="Go.TButton",
                                    command=self.run_lookup)
         self.find_btn.pack(side="left", padx=(8, 0))
         self.find_note = ttk.Label(bar, style="Dim.TLabel")
         self.find_note.pack(side="left", padx=(14, 0))
 
-        body = ttk.Frame(parent)
-        body.pack(fill="both", expand=True)
+        # The suggestion list floats over the table rather than sitting beside
+        # it, so it behaves like the autocomplete people expect: type, arrow
+        # down, Enter. Item names are unforgiving about spelling.
+        self.suggest_win = None
+        self.suggest_list = None
 
-        left = ttk.Frame(body)
-        left.pack(side="left", fill="y", padx=(0, 12))
-        ttk.Label(left, text="MATCHES", style="Dim.TLabel").pack(anchor="w")
-        self.match_list = tk.Listbox(
-            left, width=38, height=20, bg=PANEL, fg=INK_2, font=self.f_body,
-            selectbackground=_mix(PANEL, GOLD, 0.2), selectforeground=GOLD,
-            highlightthickness=0, borderwidth=0, activestyle="none")
-        self.match_list.pack(fill="y", expand=True, pady=(6, 0))
-        self.match_list.bind("<Double-1>", lambda e: self.run_lookup())
-        self.match_list.bind("<Return>", lambda e: self.run_lookup())
+        self.find_head = ttk.Label(parent, style="Dim.TLabel", justify="left",
+                                   wraplength=1320)
+        self.find_head.pack(anchor="w", pady=(10, 6))
 
-        right = ttk.Frame(body)
-        right.pack(side="left", fill="both", expand=True)
-        self.find_head = ttk.Label(right, style="Dim.TLabel", justify="left",
-                                   wraplength=900)
-        self.find_head.pack(anchor="w", pady=(0, 6))
-        cols = (("dir", "Route", 150, "w"), ("q", "Q", 34, "center"),
-                ("world", "Sell on", 110, "w"), ("buy", "Buy", 90, "e"),
-                ("stop", "Buy on", 130, "w"), ("sell", "Sell", 90, "e"),
-                ("profit", "Net / unit", 95, "e"), ("margin", "Margin", 70, "e"),
-                ("ahead", "Ahead", 60, "e"), ("rate", "Sells / day", 85, "e"))
-        tree = ttk.Treeview(right, columns=[c[0] for c in cols],
-                            show="headings", selectmode="browse")
+        cols = (("region", "Region", 120, "w"), ("world", "World", 110, "w"),
+                ("q", "Q", 34, "center"), ("buy", "Cheapest here", 105, "e"),
+                ("units", "For sale", 75, "e"), ("sell", "Sells for", 100, "e"),
+                ("rate", "Sells / day", 85, "e"), ("sold", "Sold", 60, "e"),
+                ("net", "Net / unit", 95, "e"), ("margin", "Margin", 70, "e"))
+        tree = ttk.Treeview(parent, columns=[c[0] for c in cols],
+                            show="tree headings", selectmode="browse")
+        tree.column("#0", width=self.px(16), stretch=False)
         for key, label, width, anchor in cols:
             tree.heading(key, text=label)
             tree.column(key, width=self.px(width), anchor=anchor,
-                        stretch=(key == "dir"))
+                        stretch=(key == "region"))
         tree.tag_configure("odd", background=PANEL_2)
+        tree.tag_configure("group", foreground=GOLD, background=PANEL_2)
+        tree.tag_configure("best", foreground=GOOD)
         tree.tag_configure("loss", foreground=INK_3)
-        tree.tag_configure("good", foreground=GOOD)
+        tree.tag_configure("cheap", foreground=GOLD)
         tree.pack(fill="both", expand=True)
         self.find_tree = tree
         self._refresh_matches()
 
-    def _refresh_matches(self):
-        """Local substring search over the cached name index."""
-        self.match_list.delete(0, "end")
-        self.found = []
+    # -- autocomplete ------------------------------------------------------
+
+    def _matches_for(self, text):
+        if not self.name_index:
+            return []
+        return engine.search_names(self.name_index, text, limit=12)
+
+    def _suggest(self):
+        """Drop a list of matching item names under the box as you type."""
+        self.found = self._matches_for(self.find_var.get())
         if not self.name_index:
             self.find_note.configure(
                 text="press Look up to build the item index first (about a minute)")
+            self._hide_suggest()
             return
-        query = self.find_var.get()
-        if len(query.strip()) < 2:
-            self.find_note.configure(
-                text=f"{len(self.name_index):,} items indexed — type two letters")
-            return
-        self.found = engine.search_names(self.name_index, query)
-        for _iid, name in self.found:
-            self.match_list.insert("end", name)
-        if self.found:
-            self.match_list.selection_set(0)
+        typed = self.find_var.get().strip()
         self.find_note.configure(
-            text=f"{len(self.found)} match{'' if len(self.found) == 1 else 'es'}")
+            text=(f"{len(self.name_index):,} items indexed" if len(typed) < 2
+                  else f"{len(self.found)} match"
+                       f"{'' if len(self.found) == 1 else 'es'}"))
+        if not self.found or len(typed) < 2:
+            self._hide_suggest()
+            return
+        # An exact hit needs no menu in the way.
+        if len(self.found) == 1 and self.found[0][1].lower() == typed.lower():
+            self._hide_suggest()
+            return
+        self._show_suggest()
+
+    def _show_suggest(self):
+        if self.suggest_win is None or not self.suggest_win.winfo_exists():
+            self.suggest_win = tk.Toplevel(self)
+            self.suggest_win.overrideredirect(True)
+            self.suggest_win.attributes("-topmost", True)
+            self.suggest_list = tk.Listbox(
+                self.suggest_win, font=self.f_body, bg=PANEL, fg=INK,
+                selectbackground=_mix(PANEL, GOLD, 0.25), selectforeground=GOLD,
+                highlightthickness=1, highlightbackground=LINE,
+                borderwidth=0, activestyle="none")
+            self.suggest_list.pack(fill="both", expand=True)
+            self.suggest_list.bind("<Button-1>",
+                                   lambda e: self.after(1, self._suggest_take))
+            self.suggest_list.bind("<Return>", self._suggest_take)
+        self.suggest_list.delete(0, "end")
+        for _iid, name in self.found:
+            self.suggest_list.insert("end", name)
+        self.suggest_list.selection_clear(0, "end")
+        self.suggest_list.selection_set(0)
+        rows = min(len(self.found), 10)
+        x = self.find_entry.winfo_rootx()
+        y = self.find_entry.winfo_rooty() + self.find_entry.winfo_height()
+        width = max(self.find_entry.winfo_width(), self.px(320))
+        self.suggest_win.geometry(f"{width}x{rows * self.px(21) + 4}+{x}+{y}")
+        self.suggest_win.deiconify()
+        self.suggest_list.configure(height=rows)
+
+    def _hide_suggest(self):
+        if self.suggest_win is not None and self.suggest_win.winfo_exists():
+            self.suggest_win.withdraw()
+
+    def _suggest_move(self, delta):
+        if not (self.suggest_win and self.suggest_win.winfo_exists()
+                and self.suggest_win.winfo_viewable()):
+            return
+        size = self.suggest_list.size()
+        if not size:
+            return
+        cur = (self.suggest_list.curselection() or (0,))[0]
+        nxt = max(0, min(size - 1, cur + delta))
+        self.suggest_list.selection_clear(0, "end")
+        self.suggest_list.selection_set(nxt)
+        self.suggest_list.see(nxt)
+
+    def _suggest_down(self, _e=None):
+        self._suggest_move(1)
+        return "break"
+
+    def _suggest_up(self, _e=None):
+        self._suggest_move(-1)
+        return "break"
+
+    def _suggest_take(self, _e=None):
+        """Put the highlighted suggestion in the box, then look it up."""
+        if (self.suggest_win and self.suggest_win.winfo_exists()
+                and self.suggest_win.winfo_viewable()):
+            sel = self.suggest_list.curselection()
+            if sel and sel[0] < len(self.found):
+                name = self.found[sel[0]][1]
+                self._hide_suggest()
+                self.find_var.set(name)
+                self.find_entry.icursor("end")
+                self._hide_suggest()
+                self.run_lookup()
+                return "break"
+        self._hide_suggest()
+        self.run_lookup()
+        return "break"
+
+    def _refresh_matches(self):
+        self.found = self._matches_for(self.find_var.get())
+        if not self.name_index:
+            self.find_note.configure(
+                text="press Look up to build the item index first (about a minute)")
+        else:
+            self.find_note.configure(text=f"{len(self.name_index):,} items indexed")
 
     def run_lookup(self):
         if self.worker and self.worker.is_alive():
@@ -1020,11 +1106,15 @@ class App(tk.Tk):
         if not self.name_index:
             self._build_index()
             return
-        sel = self.match_list.curselection()
-        if not sel or int(sel[0]) >= len(self.found):
-            self.status.set("Pick an item from the matches first.")
+        typed = self.find_var.get().strip()
+        exact = [(i, n) for i, n in (self.found or [])
+                 if n.lower() == typed.lower()]
+        pick = exact or self.found
+        if not pick:
+            self.status.set("No item matches that. Check the spelling — the "
+                            "dropdown shows what's available as you type.")
             return
-        item_id, name = self.found[int(sel[0])]
+        item_id, name = pick[0]
         self.status.set(f"Pricing {name} on every world…")
         self.progress.pack(fill="x", padx=18, pady=(10, 0))
         self.progress["value"] = 0
@@ -1066,31 +1156,68 @@ class App(tk.Tk):
         self.worker.start()
 
     def _show_lookup(self, name, res):
+        """One row per world, grouped by region, both qualities."""
         tree = self.find_tree
         tree.delete(*tree.get_children())
-        rows, notes = [], []
-        for quality, blob in res.items():
-            for direction, side in blob.items():
-                label = ("NA → Materia" if direction == "fwd" else "Materia → NA")
-                notes.append(f"{quality} {label}: cheapest {side['buy']:,} on "
-                             f"{side['stop']} ({side['stock']} in stock)")
-                for r in side["rows"]:
-                    rows.append((label, quality, side, r))
-        rows.sort(key=lambda x: -x[3]["profit"])
-        for i, (label, quality, side, r) in enumerate(rows):
-            tags = ["odd"] if i % 2 else []
-            tags.append("good" if r["profit"] > 0 else "loss")
-            tree.insert("", "end", tags=tags, values=(
-                label, quality, r["world"], f"{side['buy']:,}",
-                f"{side['stop']} ×{side['stop_units']:,}", f"{r['sell']:,}",
-                f"{r['profit']:,}", f"{r['margin']}%", f"{r['ahead']:,}",
-                fmt("rate", r["rate"])))
-        self.find_head.configure(text=f"{name}\n" + "     ".join(notes))
-        best = rows[0][3]["profit"] if rows else 0
-        self.status.set(
-            f"{name}: {len(rows)} world/route combinations priced — "
-            + (f"best is {best:,} gil a unit." if best > 0
-               else "none of them make money right now."))
+        notes = []
+
+        for quality in ("HQ", "NQ"):
+            blob = res.get(quality)
+            if not blob:
+                continue
+            cheapest, dearest, best = (blob.get("cheapest"), blob.get("dearest"),
+                                       blob.get("best"))
+            if cheapest:
+                notes.append(f"{quality}: cheapest {cheapest['buy']:,} on "
+                             f"{cheapest['world']}")
+            if best and best.get("net", 0) > 0:
+                notes.append(f"best {best['net']:,}/unit selling on "
+                             f"{best['world']} ({best['margin']}%)")
+
+            by_region = {}
+            for r in blob["rows"]:
+                by_region.setdefault(r["region"], []).append(r)
+
+            for region in ("North America", "Materia"):
+                rows = by_region.get(region)
+                if not rows:
+                    continue
+                live = [r for r in rows if r["buy"] is not None]
+                cheap_here = min((r["buy"] for r in live), default=None)
+                parent = tree.insert(
+                    "", "end", open=True, tags=("group",),
+                    values=(f"{region} — {quality}", f"{len(rows)} worlds", "",
+                            f"{cheap_here:,}" if cheap_here else "—",
+                            f"{sum(r['units'] for r in rows):,}", "", "",
+                            f"{sum(r['sold'] for r in rows):,}", "", ""))
+                for i, r in enumerate(sorted(rows, key=lambda x: -(x["net"] or -10**9))):
+                    tags = ["odd"] if i % 2 else []
+                    if best and r is best:
+                        tags.append("best")
+                    elif cheapest and r is cheapest:
+                        tags.append("cheap")
+                    elif r["net"] is not None and r["net"] <= 0:
+                        tags.append("loss")
+                    tree.insert(parent, "end", tags=tags, values=(
+                        "", r["world"], quality,
+                        f"{r['buy']:,}" if r["buy"] else "— none —",
+                        f"{r['units']:,}" if r["units"] else "—",
+                        f"{r['sell']:,}" if r["sell"] else "—",
+                        fmt("rate", r["rate"]) if r["rate"] else "—",
+                        f"{r['sold']:,}" if r["sold"] else "—",
+                        f"{r['net']:,}" if r["net"] is not None else "—",
+                        f"{r['margin']}%" if r["margin"] is not None else "—"))
+
+        self.find_head.configure(
+            text=f"{name}\n" + "     ".join(notes) if notes else name)
+        hq = res.get("HQ", {}).get("best")
+        nq = res.get("NQ", {}).get("best")
+        top = max((b for b in (hq, nq) if b), key=lambda b: b["net"], default=None)
+        if top and top["net"] > 0:
+            self.status.set(f"{name}: best is {top['net']:,} a unit selling on "
+                            f"{top['world']} ({top['region']}).")
+        else:
+            self.status.set(f"{name}: nothing profitable anywhere right now.")
 
     # -- auto refresh ------------------------------------------------------
 
