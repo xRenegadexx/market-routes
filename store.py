@@ -271,10 +271,10 @@ PRESETS = {
         "warn": "#ff2f1f",
     },
     "Mainframe": {
-        "ground": "#0a0304", "surface": "#150609", "surface2": "#1c0a0e",
-        "line": "#3a1218", "ink": "#ffd9d4", "ink2": "#d98a84",
-        "ink3": "#b47370", "accent": "#ff3b30", "good": "#4fd18b",
-        "warn": "#ffa93d",
+        "ground": "#000000", "surface": "#0b0202", "surface2": "#160404",
+        "line": "#571515", "ink": "#ffecea", "ink2": "#ff9a92",
+        "ink3": "#e0706a", "accent": "#ff1a0d", "good": "#35e57f",
+        "warn": "#ffc21f",
     },
     "Amber": {
         "ground": "#0b0803", "surface": "#161007", "surface2": "#1d160a",

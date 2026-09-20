@@ -235,6 +235,46 @@ def window_scale(widget, fallback=1.0):
     return fallback
 
 
+def monitor_work_area(widget):
+    """(x, y, width, height) of the usable area of THIS window's monitor.
+
+    Tk only offers winfo_screenwidth(), which reports the primary display --
+    the wrong question the moment a second monitor exists. The work area also
+    excludes the taskbar, so a maximised-ish window doesn't end up underneath
+    it.
+
+    Falls back to Tk's answer when the call isn't available, which is no worse
+    than what the app did before.
+    """
+    fallback = (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
+    if sys.platform != "win32":
+        return fallback
+    try:
+        import ctypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
+                        ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
+
+        user32 = ctypes.windll.user32
+        # MONITOR_DEFAULTTONEAREST: mid-drag a window can straddle two screens.
+        handle = user32.MonitorFromWindow(int(widget.winfo_id()), 2)
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+            work = info.rcWork
+            width, height = work.right - work.left, work.bottom - work.top
+            if width > 100 and height > 100:
+                return (work.left, work.top, width, height)
+    except Exception:
+        pass
+    return fallback
+
+
 def age_text(hours):
     if hours is None:
         return "no data yet"
@@ -252,8 +292,9 @@ class App(tk.Tk):
         self.title(f"FFXIV Market Routes {paths.VERSION} — Materia and NA")
         # Size the window to the display, not to a fixed pixel count: 1420px is
         # a sensible window on a 1080p screen and a postage stamp on a 4K one.
-        width = min(int(1420 * self.scale), self.winfo_screenwidth() - 80)
-        height = min(int(830 * self.scale), self.winfo_screenheight() - 120)
+        _mx, _my, avail_w, avail_h = monitor_work_area(self)
+        width = min(int(1420 * self.scale), avail_w - 80)
+        height = min(int(830 * self.scale), avail_h - 120)
         self.geometry(f"{width}x{height}")
         self.minsize(int(980 * min(self.scale, 1.5)),
                      int(580 * min(self.scale, 1.5)))
@@ -326,25 +367,33 @@ class App(tk.Tk):
         self.tk.call("tk", "scaling", self.scale * 1.3333)
         self._style()                       # row heights, fonts, the palette
         self._resize_columns()
-        self._fit_to_screen()
+        self._refit_window(old, found)
         self.status.set(f"Display scale changed ({old:.2f} to {found:.2f}) — "
                         f"resized to match this monitor.")
 
-    def _fit_to_screen(self):
-        """Shrink the window if it is now wider or taller than the display.
+    def _refit_window(self, old, new):
+        """Resize the window in step with everything inside it.
 
-        A window sized for a 4K monitor is bigger than a 1080p screen, so after
-        moving there its edges can sit off the display with no way to grab them.
+        The contents just changed size by new/old. If the frame doesn't follow,
+        the same layout is being shown through a hole of the old size -- either
+        marooned in empty space, or cropped with its right-hand columns and
+        footer off the edge of the screen. The second is what "zoomed in" turns
+        out to mean in practice.
+
+        Everything is then clamped to the monitor the window is actually on,
+        which is the fix for a window that keeps its 4K width on a 1080p
+        screen: two thirds visible, the rest hanging off the side, and no way
+        to grab an edge that isn't there.
         """
+        if not old:
+            return
         try:
-            screen_w = self.winfo_screenwidth()
-            screen_h = self.winfo_screenheight()
-            width = min(self.winfo_width(), screen_w - self.px(40))
-            height = min(self.winfo_height(), screen_h - self.px(80))
-            if width < self.winfo_width() or height < self.winfo_height():
-                x = max(0, min(self.winfo_x(), screen_w - width))
-                y = max(0, min(self.winfo_y(), screen_h - height))
-                self.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
+            left, top, avail_w, avail_h = monitor_work_area(self)
+            width = min(int(self.winfo_width() * (new / old)), avail_w)
+            height = min(int(self.winfo_height() * (new / old)), avail_h)
+            x = min(max(self.winfo_x(), left), left + avail_w - width)
+            y = min(max(self.winfo_y(), top), top + avail_h - height)
+            self.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
         except tk.TclError:
             pass
 
