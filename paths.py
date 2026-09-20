@@ -12,6 +12,7 @@ opened from Program Files, a read-only share, or straight out of a zip viewer).
 
 import os
 import sys
+import time
 
 FROZEN = getattr(sys, "frozen", False)
 APP_NAME = "FFXIV Market Routes"
@@ -19,7 +20,7 @@ APP_NAME = "FFXIV Market Routes"
 # Bump on every release. It shows in About and the window title, and is written
 # into error.log -- so a crash report from someone else says which build it came
 # from, which is the whole point of having it.
-VERSION = "1.9.8"
+VERSION = "1.9.9"
 
 # Where "Check for updates" looks. This is compiled into every build, which is
 # how a tester's exe knows where to find new versions -- they have no git clone
@@ -95,8 +96,25 @@ def _lock_path():
 _handle = None
 
 
-def claim_single_instance():
-    """Return (ok, detail). ok is False when another copy already holds the lock."""
+def claim_single_instance(wait=0.0):
+    """Return (ok, detail). ok is False when another copy already holds the lock.
+
+    `wait` gives the previous copy time to let go. It is for one situation: an
+    update has just restarted the app, so for a second or two the version being
+    replaced is still shutting down and still holds the lock. Refusing to start
+    over that would be absurd -- we are the one it asked for. Everywhere else
+    waits zero, so double-clicking twice still says "already open" at once.
+    """
+    global _handle
+    deadline = time.monotonic() + max(0.0, wait)
+    while True:
+        ok, detail = _try_claim()
+        if ok or time.monotonic() >= deadline:
+            return ok, detail
+        time.sleep(0.25)
+
+
+def _try_claim():
     global _handle
     try:
         os.makedirs(DATA_DIR, exist_ok=True)

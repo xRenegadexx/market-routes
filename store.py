@@ -24,7 +24,6 @@ DEFAULTS = {
     "auto_refresh_hours": 12,    # how old "stale" means
     "refresh_on_open": False,    # scan at launch if the data is already stale
     "check_updates_on_open": True,   # ask GitHub for a newer version at startup
-    "check_updates_on_open": True,   # ask GitHub for a newer version at startup
     "budget_gil": 0,             # 0 = don't track
     "affordable_only": False,    # hide rows a run couldn't pay for
     "uncontested_only": False,   # hide rows with sellers under you
@@ -251,13 +250,65 @@ PRESETS = {
     "Parchment": {
         "ground": "#eceae3", "surface": "#ffffff", "surface2": "#f5f3ec",
         "line": "#d8d3c6", "ink": "#23211c", "ink2": "#545046",
-        "ink3": "#6f695c", "accent": "#9c6f16", "good": "#2f7a6d",
+        "ink3": "#6f695c", "accent": "#875f0f", "good": "#2f7a6d",
         "warn": "#a8503a",
     },
     "Slate": {
         "ground": "#1b1d21", "surface": "#24272c", "surface2": "#2c3037",
         "line": "#3a3f47", "ink": "#eceef1", "ink2": "#b3b9c2", "ink3": "#8c939d",
         "accent": "#c9a227", "good": "#5fb98f", "warn": "#d98b6a",
+    },
+    # The three below are phosphor terminals: one hue lighting an almost-black
+    # screen. The catch with a one-colour scheme is that "good" and "warn" have
+    # to stay legible as meanings, not decoration -- so whichever hue the theme
+    # is built from, those two are pulled off it far enough to read at a
+    # glance. A red accent means warnings go amber; a green accent means profit
+    # goes teal.
+    "Matrix": {
+        "ground": "#020604", "surface": "#08130c", "surface2": "#0c1c12",
+        "line": "#16391f", "ink": "#c9ffd6", "ink2": "#6bd389",
+        "ink3": "#429a5c", "accent": "#39ff70", "good": "#00d9a3",
+        "warn": "#ff5c4d",
+    },
+    "Mainframe": {
+        "ground": "#0a0304", "surface": "#150609", "surface2": "#1c0a0e",
+        "line": "#3a1218", "ink": "#ffd9d4", "ink2": "#d98a84",
+        "ink3": "#b47370", "accent": "#ff3b30", "good": "#4fd18b",
+        "warn": "#ffa93d",
+    },
+    "Amber": {
+        "ground": "#0b0803", "surface": "#161007", "surface2": "#1d160a",
+        "line": "#3a2c11", "ink": "#ffcf8f", "ink2": "#c69a55",
+        "ink3": "#a9814a", "accent": "#ffb000", "good": "#7dd86a",
+        "warn": "#ff5555",
+    },
+    # Ishgard is the only cold light scheme here; Parchment is the warm one,
+    # and a bright room wants one or the other depending on the monitor.
+    "Ishgard": {
+        "ground": "#e7edf3", "surface": "#ffffff", "surface2": "#f1f5f9",
+        "line": "#c5d2e0", "ink": "#182231", "ink2": "#485a6e",
+        "ink3": "#5d7086", "accent": "#2f6f9f", "good": "#1d7a5c",
+        "warn": "#a8442f",
+    },
+    "Thavnair": {
+        "ground": "#04161a", "surface": "#082127", "surface2": "#0b2b32",
+        "line": "#134048", "ink": "#e2f4f2", "ink2": "#8fc2c0",
+        "ink3": "#5f9693", "accent": "#f25f8a", "good": "#3fd6a8",
+        "warn": "#ffb347",
+    },
+    "Nocturne": {
+        "ground": "#0f0d18", "surface": "#171429", "surface2": "#1e1a33",
+        "line": "#2f2950", "ink": "#e9e5f7", "ink2": "#aea4cf",
+        "ink3": "#877ca8", "accent": "#a98bff", "good": "#5ecf9e",
+        "warn": "#ff8397",
+    },
+    # Not a style so much as a fallback: maximum separation between text and
+    # background, for a glare-lit room or eyes that want no subtlety at all.
+    "High contrast": {
+        "ground": "#000000", "surface": "#0d0d0d", "surface2": "#171717",
+        "line": "#4d4d4d", "ink": "#ffffff", "ink2": "#e2e2e2",
+        "ink3": "#bdbdbd", "accent": "#ffe14d", "good": "#5cff9d",
+        "warn": "#ff8f6b",
     },
 }
 

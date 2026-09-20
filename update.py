@@ -9,7 +9,8 @@ Two situations, two mechanisms:
                overwritten, but it will let one be *renamed* -- so the live exe
                is moved aside and the new one takes its name. The moved-aside
                copy goes into the data folder rather than staying next to the
-               app, and is deleted as soon as the app closes.
+               app, and the restart that follows deletes it -- the new copy is
+               not the one holding it open.
 
   From source  Downloads the tracked .py files at the newest commit, the same
                way it always has.
@@ -30,6 +31,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -60,9 +62,6 @@ class UpdateError(Exception):
     """Anything that stops an update, phrased for a person to read."""
 
 
-# The exe we replaced, waiting to be deleted. It can't be deleted while it is
-# still the image of this running process; see _delete_when_free.
-_PENDING_DELETE = None
 RETIRED_NAME = "previous-version.exe"
 
 
@@ -290,9 +289,10 @@ def _install_exe(info):
         _quiet_remove(incoming)
         raise UpdateError(f"Couldn't put the new version in place: {e}") from e
 
-    # It is out of the way now but still on disk, because it is this process's
-    # own image. Nothing can delete it until we exit, so queue it up.
-    globals()["_PENDING_DELETE"] = retired
+    # It is out of the way and unreachable from the app folder, but still on
+    # disk: it is this process's own image, and Windows won't delete that. The
+    # new copy is under no such restriction, so the restart clears it -- see
+    # relaunch() and tidy_after_restart().
     return [f"{os.path.basename(live)} -> {info.get('version', 'newest')}"], False
 
 
@@ -329,64 +329,76 @@ def _sweep_retired(folder):
     _quiet_remove(os.path.join(CACHE, "retired", RETIRED_NAME))
 
 
-def finish_cleanup():
-    """Arrange for the replaced exe to be gone once this process has.
+def relaunch():
+    """Start the version we just installed and leave the rest to it.
 
-    Called on the way out. Until now the old copy has been unkillable -- it is
-    the image this very process is running from -- which is why it used to
-    survive until the next launch. A small script started here outlives us by a
-    few seconds and does what we can't.
+    This is the whole cleanup mechanism now. We cannot delete the copy we
+    replaced -- it is the image this process is running from -- but the new
+    copy can, and it already sweeps leftovers on startup. Restarting is also
+    what the person is about to do by hand, so doing it for them costs nothing
+    and finishes the job in one step.
 
-    Safe to call when no update happened; it does nothing.
+    Deliberately not spawned through _spawn_hidden: that hides the first window
+    a process shows, which is exactly wrong for an app whose entire purpose is
+    to put a window on screen. A windowed build gets no console either way, so
+    there is nothing here to suppress.
     """
-    target = _PENDING_DELETE
-    if not target or not os.path.exists(target):
-        return
-    globals()["_PENDING_DELETE"] = None
-    _delete_when_free(target)
+    if not paths.FROZEN:
+        raise UpdateError("Only the built app can restart itself.")
+    exe = os.path.abspath(sys.executable)
 
-
-def _delete_when_free(target):
-    """Leave a script that keeps trying the delete until it works.
-
-    No need to check whether we have exited: the delete simply fails while the
-    file is still a running image and succeeds the moment it isn't. Trying is
-    the wait.
-
-    It lives in the temp folder rather than beside the app -- swapping one bit
-    of visible litter for another would miss the point -- and removes itself
-    when it's done.
-    """
-    if sys.platform != "win32":
-        _quiet_remove(target)
-        return
-    body = f"""@echo off
-rem Written by {paths.APP_NAME} to delete the version it replaced.
-setlocal
-set tries=0
-:retry
-del /f /q "{target}" >nul 2>&1
-if not exist "{target}" goto done
-set /a tries+=1
-if %tries% GEQ 40 goto done
-ping -n 2 127.0.0.1 >nul
-goto retry
-:done
-del "%~f0"
-"""
+    # A onefile build unpacks itself into a temp folder and passes the location
+    # to its second stage in the environment. A child started from in here
+    # inherits those variables, decides it *is* that second stage, and exits
+    # immediately -- silently, with the spawn reporting success. Strip them so
+    # the new process bootstraps itself from scratch, the way a double-click
+    # would. Found by testing a real build; it cannot happen when running from
+    # source, which is exactly why it went unnoticed.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("_MEI", "_PYI"))}
     try:
-        script = os.path.join(tempfile.gettempdir(), "market-routes-tidy.cmd")
-        with open(script, "w", encoding="ascii", errors="replace") as fh:
-            fh.write(body)
-        subprocess.Popen(["cmd", "/c", script],
-                         cwd=tempfile.gettempdir(),
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                         | getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        subprocess.Popen([exe, "--relaunch"], cwd=os.path.dirname(exe),
+                         env=env,
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
                          close_fds=True)
-    except (OSError, ValueError):
-        # Not worth telling anyone about on the way out the door. The startup
-        # sweep will catch it next time instead.
-        pass
+    except (OSError, ValueError) as exc:
+        raise UpdateError(f"Couldn't start the new version: {exc}") from exc
+
+
+def _spawn_hidden(args, cwd=None):
+    """Start a background helper with nothing visible and nothing inherited.
+
+    Two separate things have to be right or a console window appears:
+
+      CREATE_NO_WINDOW   the documented flag for running a console program
+                         without giving it a console window. It must NOT be
+                         combined with DETACHED_PROCESS or CREATE_NEW_CONSOLE;
+                         Windows treats the three as mutually exclusive and
+                         picks one, and the one it picked handed cmd a console
+                         of its own. DETACHED_PROCESS was never needed anyway
+                         -- a child outlives its parent regardless.
+
+      STARTUPINFO        SW_HIDE, which covers anything the child tries to
+                         show for itself.
+
+    The standard handles go to nul because a --windowed build has none to pass
+    on, and a child that inherits broken handles behaves unpredictably.
+    """
+    startup = None
+    if sys.platform == "win32":
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+    return subprocess.Popen(
+        args, cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        startupinfo=startup,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        close_fds=True)
 
 
 def _finish_on_exit(live, incoming):
@@ -426,10 +438,7 @@ del "%~f0"
             f"Move it somewhere like your Desktop and try again.") from e
 
     try:
-        subprocess.Popen(["cmd", "/c", script], cwd=folder,
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                         | getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                         close_fds=True)
+        _spawn_hidden(["cmd", "/c", script], cwd=folder)
     except OSError as e:
         _quiet_remove(script)
         _quiet_remove(incoming)
@@ -472,27 +481,39 @@ def _install_source(info):
 
 
 def _quiet_remove(path):
+    """Delete if it's there. True once the path is gone, one way or the other."""
     try:
         os.remove(path)
+        return True
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
 
 
-def tidy_after_restart():
+def tidy_after_restart(patient=False):
     """Clear anything an update left behind. Called once at startup.
 
-    The delete normally happens as the old version closes. This is the backstop
-    for when it couldn't -- a crash instead of a clean exit, or antivirus
-    stopping the script from running -- so the folder can't accumulate old
-    versions either way. Every previous build is still on the Releases page if
-    one is ever needed back.
+    This is where a replaced version actually dies. `patient` says we were
+    started by an update, so the copy being deleted may still be finishing its
+    own shutdown -- a few seconds of retrying covers that. Without it the
+    delete would fail by a fraction of a second and the file would survive
+    until the launch after this one, which was the original complaint.
     """
     if not paths.FROZEN:
         return
     folder = os.path.dirname(os.path.abspath(sys.executable))
-    for leftover in (RETIRED_NAME, "update-incoming.exe", "finish-update.cmd"):
-        _quiet_remove(os.path.join(folder, leftover))
-    _quiet_remove(os.path.join(CACHE, "retired", RETIRED_NAME))
+    leftovers = [os.path.join(folder, name) for name in
+                 (RETIRED_NAME, "update-incoming.exe", "finish-update.cmd")]
+    leftovers.append(os.path.join(CACHE, "retired", RETIRED_NAME))
+
+    deadline = time.monotonic() + (20.0 if patient else 0.0)
+    while True:
+        leftovers = [path for path in leftovers if not _quiet_remove(path)]
+        if not leftovers or time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+
     try:
         os.rmdir(os.path.join(CACHE, "retired"))
     except OSError:

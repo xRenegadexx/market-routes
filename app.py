@@ -2210,10 +2210,10 @@ class App(tk.Tk):
         if info.get("mode") == "exe":
             question = (f"Replace this app with version {version} from "
                         f"{info['slug']}?\n\nIt updates in place rather than "
-                        f"leaving a second copy behind. Every earlier build "
-                        f"stays downloadable from the releases page if you "
-                        f"ever want one back. You'll need to restart "
-                        f"afterwards.")
+                        f"leaving a second copy behind, and offers to restart "
+                        f"for you when it's done. Every earlier build stays "
+                        f"downloadable from the releases page if you ever "
+                        f"want one back.")
         else:
             question = (f"Replace this app's files with {version} from "
                         f"{info['slug']}?\n\nThe current files are copied to the "
@@ -2242,12 +2242,21 @@ class App(tk.Tk):
                 self.on_close()
             return
         self.status.set("Updated — restart to run the new version.")
-        messagebox.showinfo(
-            "Update installed",
-            "Replaced: " + ", ".join(changed) +
-            "\n\nClose and reopen the app to run it. Your scans, shopping "
-            "list and settings are untouched. The version it replaced is "
-            "removed as soon as you close the app.")
+        if messagebox.askyesno(
+                "Update installed",
+                f"Version {version} is ready.\n\nRestart now? It takes a "
+                f"second and your scans, shopping list and settings are "
+                f"untouched.\n\nChoosing later leaves you on the old version "
+                f"until you next open the app."):
+            try:
+                update.relaunch()
+            except update.UpdateError as exc:
+                messagebox.showwarning(
+                    "Couldn't restart",
+                    f"{exc}\n\nClose and reopen the app yourself and you'll "
+                    f"be on the new version.")
+                return
+            self.on_close()
 
     # -- item detail -------------------------------------------------------
 
@@ -3110,14 +3119,6 @@ class App(tk.Tk):
         store.save_settings(self.settings)
         store.save_basket(self.basket)
         store.save_positions(self.positions)
-        # If an update ran this session, the version it replaced is still on
-        # disk because a program can't delete the file it is running from.
-        # Hand that off to something that outlives us. Never let it stop the
-        # window from closing.
-        try:
-            update.finish_cleanup()
-        except Exception:
-            pass
         self.destroy()
 
 
@@ -3156,12 +3157,15 @@ def report_fatal(exc_type, value, tb):
 if __name__ == "__main__":
     sys.excepthook = report_fatal
 
+    # An update restarted us. The version being replaced is still shutting
+    # down, so wait for it rather than refusing to start, and wait again for
+    # its exe to become deletable.
+    after_update = "--relaunch" in sys.argv[1:]
+
     # Two copies sharing a data folder both scan, which puts us over the API's
     # 8-connection cap and fills the results with holes. Seen for real: two
     # overlapping scans lost 56 of 916 requests.
-    update.tidy_after_restart()
-
-    held, other = paths.claim_single_instance()
+    held, other = paths.claim_single_instance(wait=15.0 if after_update else 0.0)
     if not held:
         root = tk.Tk()
         root.withdraw()
@@ -3174,6 +3178,10 @@ if __name__ == "__main__":
             % (f" (process {other})" if other else ""))
         root.destroy()
         raise SystemExit(0)
+
+    # Only now, with the lock in hand, is the old copy certain to be on its way
+    # out and its exe releasable.
+    update.tidy_after_restart(patient=after_update)
 
     try:
         window = App()
