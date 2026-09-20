@@ -11,6 +11,7 @@ opened from Program Files, a read-only share, or straight out of a zip viewer).
 """
 
 import os
+import shutil
 import sys
 import time
 
@@ -20,7 +21,7 @@ APP_NAME = "FFXIV Market Routes"
 # Bump on every release. It shows in About and the window title, and is written
 # into error.log -- so a crash report from someone else says which build it came
 # from, which is the whole point of having it.
-VERSION = "1.9.9"
+VERSION = "2.0.0"
 
 # Where "Check for updates" looks. This is compiled into every build, which is
 # how a tester's exe knows where to find new versions -- they have no git clone
@@ -41,18 +42,93 @@ def _writable(directory):
         return False
 
 
+def _drop_if_empty(folder):
+    """Remove a folder once only disposable things are left in it."""
+    try:
+        for junk in ("running.lock", ".write-test"):
+            try:
+                os.remove(os.path.join(folder, junk))
+            except OSError:
+                pass
+        os.rmdir(folder)
+    except OSError:
+        pass
+
+
+def _has_data(folder):
+    """Is there anything in here worth keeping?"""
+    try:
+        return any(name not in ("running.lock", ".write-test")
+                   for name in os.listdir(folder))
+    except OSError:
+        return False
+
+
+def _migrate(old, new):
+    """Move a data folder that sat beside the exe into AppData.
+
+    File by file, because the destination folder already exists by the time we
+    get here -- the writability check makes it -- and moving a directory onto
+    an existing one nests it inside rather than becoming it.
+
+    Three rules keep this from ever costing someone a scan:
+
+      - nothing is overwritten. Where both folders hold a file the AppData one
+        wins, because it is the one the current version has been writing to.
+      - running.lock is left alone. It is the one file that is genuinely open
+        during the handover from an update's restart, and it is disposable.
+      - a file that refuses to move is simply left. This runs on every launch,
+        so a straggler is collected the next time round.
+    """
+    if not os.path.isdir(old):
+        return
+    try:
+        os.makedirs(new, exist_ok=True)
+    except OSError:
+        return
+    for name in sorted(os.listdir(old)):
+        if name in ("running.lock", ".write-test"):
+            continue
+        target = os.path.join(new, name)
+        try:
+            if os.path.exists(target):
+                shutil.rmtree(os.path.join(old, name), ignore_errors=True)                     if os.path.isdir(os.path.join(old, name))                     else os.remove(os.path.join(old, name))
+            else:
+                shutil.move(os.path.join(old, name), target)
+        except OSError:
+            pass
+    if not _has_data(old):
+        _drop_if_empty(old)
+
+
 def _resolve():
     if not FROZEN:
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
 
     beside_exe = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "data")
-    if _writable(beside_exe):
-        return beside_exe
-
     base = (os.environ.get("LOCALAPPDATA")
             or os.environ.get("XDG_DATA_HOME")
             or os.path.expanduser("~"))
-    return os.path.join(base, APP_NAME)
+    appdata = os.path.join(base, APP_NAME)
+
+    # A file beside the exe named "portable" keeps everything in one place, for
+    # running off a USB stick or keeping two independent copies. Checked before
+    # anything moves, so opting in never costs you a scan.
+    if os.path.exists(os.path.join(os.path.dirname(beside_exe), "portable")):
+        if _writable(beside_exe):
+            return beside_exe
+
+    if _writable(appdata):
+        _migrate(beside_exe, appdata)
+        # Whichever folder ended up holding the data is the one to use. Only a
+        # file that could not be moved keeps us on the old one, and only until
+        # the launch after it is free.
+        if _has_data(appdata) or not _has_data(beside_exe):
+            return appdata
+
+    if _writable(beside_exe):
+        return beside_exe
+    return appdata
 
 
 DATA_DIR = _resolve()

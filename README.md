@@ -12,8 +12,10 @@ app isn't code-signed: *More info* → *Run anyway*. Some antivirus flags it for
 the same reason.
 
 Put it somewhere writable such as Desktop or Downloads rather than Program
-Files. It keeps its data in a folder beside itself and replaces itself in place
-when it updates.
+Files. Scans and settings live in `%LOCALAPPDATA%\FFXIV Market Routes` so
+nothing appears beside the exe, and it replaces itself in place when it
+updates. Put an empty file named `portable` next to it to keep everything in
+one folder instead.
 
 The first launch scans for about five minutes before there's anything to see.
 After that it opens instantly on the last scan and checks for new versions on
@@ -87,7 +89,7 @@ Three hosts over HTTPS only and it refuses any other URL or redirect:
 `universalis.app` for market data, `v2.xivapi.com` for item names and GitHub
 only when you check for updates. No account, no telemetry, nothing collected.
 Retainer names from listings are stored locally so your own rows can be marked;
-delete the `data` folder any time and it rebuilds.
+Data menu > Open data folder finds it, and deleting it any time rebuilds it.
 
 ## Caveats
 

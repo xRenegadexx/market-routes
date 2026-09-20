@@ -268,7 +268,7 @@ PRESETS = {
         "ground": "#020604", "surface": "#08130c", "surface2": "#0c1c12",
         "line": "#16391f", "ink": "#c9ffd6", "ink2": "#6bd389",
         "ink3": "#429a5c", "accent": "#39ff70", "good": "#00d9a3",
-        "warn": "#ff5c4d",
+        "warn": "#ff2f1f",
     },
     "Mainframe": {
         "ground": "#0a0304", "surface": "#150609", "surface2": "#1c0a0e",
