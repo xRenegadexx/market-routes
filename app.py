@@ -296,8 +296,7 @@ class App(tk.Tk):
         width = min(int(1420 * self.scale), avail_w - 80)
         height = min(int(830 * self.scale), avail_h - 120)
         self.geometry(f"{width}x{height}")
-        self.minsize(int(980 * min(self.scale, 1.5)),
-                     int(580 * min(self.scale, 1.5)))
+        self._apply_minsize()
         self.configure(bg=BG)
         # Tk's own scaling governs anything measured in points.
         self.tk.call("tk", "scaling", self.scale * 1.3333)
@@ -367,33 +366,27 @@ class App(tk.Tk):
         self.tk.call("tk", "scaling", self.scale * 1.3333)
         self._style()                       # row heights, fonts, the palette
         self._resize_columns()
-        self._refit_window(old, found)
+        self._apply_minsize()
+        # Deliberately not touching the window's size or position. Whatever
+        # size it has been given is a choice someone made, and moving between
+        # screens is no reason to overrule it.
         self.status.set(f"Display scale changed ({old:.2f} to {found:.2f}) — "
-                        f"resized to match this monitor.")
+                        f"text and columns resized to match this monitor.")
 
-    def _refit_window(self, old, new):
-        """Resize the window in step with everything inside it.
+    def _apply_minsize(self):
+        """The smallest the window may be made, for the CURRENT display.
 
-        The contents just changed size by new/old. If the frame doesn't follow,
-        the same layout is being shown through a hole of the old size -- either
-        marooned in empty space, or cropped with its right-hand columns and
-        footer off the edge of the screen. The second is what "zoomed in" turns
-        out to mean in practice.
-
-        Everything is then clamped to the monitor the window is actually on,
-        which is the fix for a window that keeps its 4K width on a 1080p
-        screen: two thirds visible, the rest hanging off the side, and no way
-        to grab an edge that isn't there.
+        This used to be set once at startup and left alone, which quietly
+        became a trap: open the app on a 4K screen at 150% and the floor is
+        1470x870 for the rest of the session. Drag it to a smaller monitor and
+        that floor can be wider than the screen, so the window cannot be
+        shrunk to fit -- there is no gesture that works, because the app itself
+        is refusing. Recomputing it per display is what makes the window
+        resizable by hand again, which is the part that actually matters.
         """
-        if not old:
-            return
         try:
-            left, top, avail_w, avail_h = monitor_work_area(self)
-            width = min(int(self.winfo_width() * (new / old)), avail_w)
-            height = min(int(self.winfo_height() * (new / old)), avail_h)
-            x = min(max(self.winfo_x(), left), left + avail_w - width)
-            y = min(max(self.winfo_y(), top), top + avail_h - height)
-            self.geometry(f"{width}x{height}+{int(x)}+{int(y)}")
+            self.minsize(int(980 * min(self.scale, 1.5)),
+                         int(580 * min(self.scale, 1.5)))
         except tk.TclError:
             pass
 
@@ -554,6 +547,9 @@ class App(tk.Tk):
             f"{'built as an .exe' if paths.FROZEN else 'running from source'}"
             f" · Python {sys.version.split()[0]}\n"
             f"Display: {self.scale:.2f}x scaling, {DPI_MODE}\n"
+            f"This monitor: {monitor_work_area(self)[2]}x"
+            f"{monitor_work_area(self)[3]} usable · window "
+            f"{self.winfo_width()}x{self.winfo_height()}\n"
             f"Data folder: {paths.DATA_DIR}\n\n"
             "Finds items worth buying on one side of the Materia / North America "
             "divide and selling on the other.\n\n"

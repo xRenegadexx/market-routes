@@ -271,9 +271,9 @@ PRESETS = {
         "warn": "#ff2f1f",
     },
     "Mainframe": {
-        "ground": "#000000", "surface": "#0b0202", "surface2": "#160404",
-        "line": "#571515", "ink": "#ffecea", "ink2": "#ff9a92",
-        "ink3": "#e0706a", "accent": "#ff1a0d", "good": "#35e57f",
+        "ground": "#000000", "surface": "#0a0000", "surface2": "#150000",
+        "line": "#5e1010", "ink": "#ff3b2e", "ink2": "#f03024",
+        "ink3": "#e04638", "accent": "#ff5a4a", "good": "#35e57f",
         "warn": "#ffc21f",
     },
     "Amber": {
