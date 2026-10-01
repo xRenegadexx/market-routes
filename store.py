@@ -14,9 +14,14 @@ import os
 import paths
 
 CACHE = paths.DATA_DIR
+
+# What you keep after the market board's 5% cut, used when turning a sale price
+# back into realised profit.
+TAX_KEPT = 0.95
 BASKET = os.path.join(CACHE, "basket.json")
 SETTINGS = os.path.join(CACHE, "settings.json")
 POSITIONS = os.path.join(CACHE, "positions.json")
+SALES = os.path.join(CACHE, "sales.json")
 THEME = os.path.join(CACHE, "theme.json")
 
 DEFAULTS = {
@@ -34,6 +39,9 @@ DEFAULTS = {
     # names are only unique within a world, so two people on different servers
     # can both have a "Kupo" and matching on name alone would claim theirs.
     "retainers": [],
+    # Items you never want to see again, as {"id": ..., "name": ...}. The name
+    # is kept so Settings can list them even for items no scan has touched.
+    "hidden": [],
 }
 
 
@@ -342,6 +350,155 @@ def reset_theme():
             os.remove(THEME)
     except OSError:
         pass
+
+
+# ----------------------------------------------------------------------------
+# Hidden items
+# ----------------------------------------------------------------------------
+
+def clean_hidden(raw):
+    """Normalise the hidden list, accepting the bare-id form as well."""
+    out, seen = [], set()
+    for entry in raw if isinstance(raw, list) else []:
+        if isinstance(entry, int):
+            item_id, name = entry, f"item {entry}"
+        elif isinstance(entry, dict) and isinstance(entry.get("id"), int):
+            item_id = entry["id"]
+            name = str(entry.get("name") or f"item {item_id}")
+        else:
+            continue
+        if item_id not in seen:
+            seen.add(item_id)
+            out.append({"id": item_id, "name": name})
+    return sorted(out, key=lambda e: e["name"].lower())
+
+
+def hidden_ids(settings):
+    """Just the ids, for filtering rows."""
+    return {e["id"] for e in clean_hidden(settings.get("hidden"))}
+
+
+def hide_item(settings, item_id, name):
+    """Add one item. True if it wasn't already hidden."""
+    current = clean_hidden(settings.get("hidden"))
+    if any(e["id"] == item_id for e in current):
+        return False
+    current.append({"id": int(item_id), "name": str(name or f"item {item_id}")})
+    settings["hidden"] = clean_hidden(current)
+    return True
+
+
+def unhide_item(settings, item_id):
+    settings["hidden"] = [e for e in clean_hidden(settings.get("hidden"))
+                          if e["id"] != item_id]
+
+
+# ----------------------------------------------------------------------------
+# Sale log -- what actually sold, as opposed to what was predicted
+# ----------------------------------------------------------------------------
+
+def load_sales():
+    raw = _read(SALES, [])
+    return [r for r in raw if isinstance(r, dict) and isinstance(r.get("id"), int)]
+
+
+def save_sales(sales):
+    _write(SALES, sales)
+
+
+def sale_key(row):
+    """Identifies one sale, so re-checking a board can't log it twice."""
+    return (row.get("id"), row.get("q"), row.get("world"),
+            row.get("price"), row.get("qty"), row.get("sold_at"))
+
+
+def record_sales(sales, found):
+    """Append any of `found` not already logged. Returns how many were new."""
+    known = {sale_key(r) for r in sales}
+    added = 0
+    for row in found:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), int):
+            continue
+        if sale_key(row) in known:
+            continue
+        known.add(sale_key(row))
+        sales.append(row)
+        added += 1
+    sales.sort(key=lambda r: r.get("sold_at") or 0)
+    return added
+
+
+def _hours_on_market(row):
+    """How long it sat there, in hours, or None if we can't honestly say."""
+    start, end = row.get("listed_at"), row.get("sold_at")
+    if not start or not end or end <= start:
+        return None
+    return (end - start) / 3_600_000.0
+
+
+def sales_summary(sales, limit=8):
+    """Totals, and the leaderboards: what earns most, what moves fastest.
+
+    Earnings and speed answer different questions and routinely disagree. One
+    item can carry a run on a single fat sale while another quietly turns over
+    its slot four times a week; both are worth knowing and neither substitutes
+    for the other, so they get a table each.
+    """
+    import statistics as st
+
+    by_item = {}
+    for row in sales:
+        if not isinstance(row, dict):
+            continue
+        key = (row.get("id"), row.get("q"))
+        entry = by_item.setdefault(key, {
+            "id": row.get("id"), "name": row.get("name") or "?",
+            "q": row.get("q") or "NQ", "sales": 0, "units": 0,
+            "revenue": 0, "profit": 0, "known_cost": 0, "hours": [],
+            "estimated": False,
+        })
+        qty = int(row.get("qty") or 0)
+        price = int(row.get("price") or 0)
+        entry["sales"] += 1
+        entry["units"] += qty
+        entry["revenue"] += price * qty
+        cost = row.get("cost")
+        if isinstance(cost, (int, float)) and cost > 0:
+            entry["profit"] += round((price * TAX_KEPT - cost) * qty)
+            entry["known_cost"] += 1
+        hours = _hours_on_market(row)
+        if hours is not None:
+            entry["hours"].append(hours)
+            if row.get("estimated_start"):
+                entry["estimated"] = True
+
+    items = []
+    for entry in by_item.values():
+        entry["median_hours"] = (round(st.median(entry["hours"]), 1)
+                                 if entry["hours"] else None)
+        entry["per_day"] = (round(entry["units"] / max(
+            sum(entry["hours"]) / 24.0, 0.04), 1) if entry["hours"] else None)
+        entry.pop("hours")
+        items.append(entry)
+
+    earners = sorted([i for i in items if i["revenue"]],
+                     key=lambda i: -(i["profit"] or i["revenue"]))
+    quick = sorted([i for i in items if i["median_hours"] is not None],
+                   key=lambda i: i["median_hours"])
+    return {
+        "totals": {
+            "sales": sum(i["sales"] for i in items),
+            "units": sum(i["units"] for i in items),
+            "revenue": sum(i["revenue"] for i in items),
+            "profit": sum(i["profit"] for i in items),
+            "items": len(items),
+            "priced": sum(i["known_cost"] for i in items),
+        },
+        "best": earners[:limit],
+        "fastest": quick[:limit],
+        "slowest": list(reversed(quick))[:limit],
+        "all": sorted(items, key=lambda i: -(i["profit"] or i["revenue"])),
+    }
 
 
 def clean_retainers(raw):

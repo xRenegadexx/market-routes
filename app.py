@@ -19,6 +19,7 @@ Run:  python app.py      (or double-click run.bat on Windows)
 import io
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -80,7 +81,7 @@ DPI_MODE = "unknown"   # set by enable_hidpi(), shown in About
 
 TIER_ORDER = ["big", "bulk", "rev"]
 TAB_NAMES = ["Big ticket", "Bulk & consumables", "Materia → NA",
-             "My listings", "Look up an item", "Shopping list"]
+             "My listings", "Sales", "Look up an item", "Shopping list"]
 
 # key, heading, width, anchor, kind
 COLUMNS = [
@@ -313,6 +314,8 @@ class App(tk.Tk):
         if store.migrate_positions(self.positions):
             store.save_positions(self.positions)
         self.name_index = engine.load_name_index()
+        # What actually sold, as against what was predicted.
+        self.sales = store.load_sales()
         # One automatic attempt per session; see _auto_index.
         self.index_tried = False
         # What someone asked for while the index was still building.
@@ -631,15 +634,27 @@ class App(tk.Tk):
             frame = ttk.Frame(nb)
             nb.add(frame, text=engine.TIERS[tier]["label"])
             self.trees[tier] = self._table(frame, tier)
+            self.trees[tier].bind(
+                "<Button-3>",
+                lambda e, t=tier: self._row_menu(e, self.trees[t], t))
         pos_frame = ttk.Frame(nb)
         nb.add(pos_frame, text="My listings")
         self._positions_tab(pos_frame)
+        sales_frame = ttk.Frame(nb)
+        nb.add(sales_frame, text="Sales")
+        self._sales_tab(sales_frame)
         find_frame = ttk.Frame(nb)
         nb.add(find_frame, text="Look up an item")
         self._search_tab(find_frame)
         basket_frame = ttk.Frame(nb)
         nb.add(basket_frame, text="Shopping list")
         self._basket_tab(basket_frame)
+        for other in (getattr(self, "positions_tree", None),
+                      getattr(self, "find_tree", None),
+                      getattr(self, "basket_tree", None)):
+            if other is not None:
+                other.bind("<Button-3>",
+                           lambda e, t=other: self._row_menu(e, t))
         self.after(120, self.draw_positions)
         nb.bind("<<NotebookTabChanged>>", self._tab_changed)
         self.notebook = nb
@@ -856,6 +871,222 @@ class App(tk.Tk):
             messagebox.showinfo("Data folder",
                                 f"{paths.DATA_DIR}\n\n(couldn't open it: {exc})")
 
+    # -- sales ---------------------------------------------------------------
+
+    SALES_VIEWS = [("best", "Best earners"), ("fastest", "Fastest movers"),
+                   ("log", "Every sale")]
+
+    def _sales_tab(self, parent):
+        ttk.Label(parent, style="Dim.TLabel", wraplength=self.px(1100),
+                  justify="left",
+                  text="What actually sold, as opposed to what was predicted. "
+                       "A listing is only recorded here when the board's own "
+                       "history shows a sale at your price after you listed it "
+                       "— a listing you took down, or one the game returned to "
+                       "your retainer, leaves no sale behind and is never "
+                       "counted as income. Press Check prices on My listings "
+                       "to look for new ones."
+                  ).pack(anchor="w", pady=(6, 10))
+
+        self.sales_tiles = ttk.Frame(parent, style="Panel.TFrame")
+        self.sales_tiles.pack(fill="x", pady=(0, 12))
+
+        bar = ttk.Frame(parent)
+        bar.pack(fill="x", pady=(0, 8))
+        self.sales_view = tk.StringVar(value="best")
+        for key, label in self.SALES_VIEWS:
+            ttk.Radiobutton(bar, text=label, value=key,
+                            variable=self.sales_view, style="Toolbutton",
+                            command=self.draw_sales).pack(side="left",
+                                                          padx=(0, 6))
+        self.sales_note = ttk.Label(bar, style="Dim.TLabel")
+        self.sales_note.pack(side="left", padx=(16, 0))
+
+        self.sales_box = ttk.Frame(parent)
+        self.sales_box.pack(fill="both", expand=True)
+        self.sales_tree = None
+
+    SALES_COLUMNS = {
+        "best": [("item", "Item", 300, "w"), ("q", "Q", 50, "center"),
+                 ("sales", "Sales", 80, "e"), ("units", "Units", 90, "e"),
+                 ("revenue", "Revenue", 130, "e"), ("profit", "Profit", 130, "e")],
+        "fastest": [("item", "Item", 300, "w"), ("q", "Q", 50, "center"),
+                    ("sales", "Sales", 80, "e"),
+                    ("typical", "Typical time to sell", 180, "e"),
+                    ("perday", "Units a day", 120, "e")],
+        "log": [("when", "Sold", 160, "w"), ("item", "Item", 280, "w"),
+                ("q", "Q", 50, "center"), ("world", "World", 120, "w"),
+                ("qty", "Units", 80, "e"), ("price", "Price each", 120, "e"),
+                ("profit", "Profit", 120, "e")],
+    }
+
+    @staticmethod
+    def _spell_hours(hours):
+        if hours is None:
+            return "—"
+        if hours < 1:
+            return f"{round(hours * 60)} min"
+        if hours < 48:
+            return f"{hours:.1f} h"
+        return f"{hours / 24:.1f} days"
+
+    def draw_sales(self):
+        """Rebuild the tab. Cheap: the log is a few hundred rows at most."""
+        if not hasattr(self, "sales_box"):
+            return
+        summary = store.sales_summary(self.sales)
+        totals = summary["totals"]
+
+        for child in self.sales_tiles.winfo_children():
+            child.destroy()
+        profit = totals["profit"]
+        tiles = [
+            ("SALES", f"{totals['sales']:,}",
+             f"{totals['units']:,} units across {totals['items']} items"),
+            ("REVENUE", f"{totals['revenue']:,}", "before the 5% tax"),
+            ("REALISED PROFIT", f"{profit:,}" if totals["priced"] else "—",
+             "net of tax, where the buy price is known"
+             if totals["priced"] else "no buy prices recorded yet"),
+        ]
+        for caption, value, note in tiles:
+            cell = ttk.Frame(self.sales_tiles, style="Panel.TFrame")
+            cell.pack(side="left", expand=True, fill="x", padx=18, pady=12)
+            ttk.Label(cell, text=caption, style="Key.TLabel").pack(anchor="w")
+            ttk.Label(cell, text=value, style="Val.TLabel").pack(anchor="w")
+            ttk.Label(cell, text=note, style="Note.TLabel").pack(anchor="w")
+
+        view = self.sales_view.get()
+        if self.sales_tree is not None:
+            self.sales_tree.destroy()
+        columns = self.SALES_COLUMNS[view]
+        tree = ttk.Treeview(self.sales_box, columns=[c[0] for c in columns],
+                            show="headings", selectmode="browse")
+        for key, heading, width, anchor in columns:
+            tree.heading(key, text=heading)
+            tree.column(key, width=self.px(width), anchor=anchor)
+        tree.tag_configure("odd", background=PANEL_2)
+        tree.tag_configure("good", foreground=GOOD)
+        tree.pack(fill="both", expand=True)
+        tree.bind("<Button-3>", lambda e, t=tree: self._row_menu(e, t))
+        self.sales_tree = tree
+
+        if not self.sales:
+            self.sales_note.configure(
+                text="Nothing logged yet — sales appear after a price check "
+                     "finds one of your listings gone and the board confirms it.")
+            return
+
+        if view == "log":
+            rows = sorted(self.sales, key=lambda r: -(r.get("sold_at") or 0))
+            for i, r in enumerate(rows):
+                when = datetime.fromtimestamp(
+                    (r.get("sold_at") or 0) / 1000).strftime("%d %b %H:%M")
+                cost = r.get("cost")
+                qty = int(r.get("qty") or 0)
+                price = int(r.get("price") or 0)
+                gain = (round((price * store.TAX_KEPT - cost) * qty)
+                        if isinstance(cost, (int, float)) and cost else None)
+                tree.insert("", "end", values=(
+                    when, r.get("name") or "?", r.get("q") or "",
+                    r.get("world") or "", f"{qty:,}", f"{price:,}",
+                    f"{gain:,}" if gain is not None else "—"),
+                    tags=("odd",) if i % 2 else ())
+            self.sales_note.configure(text=f"{len(rows)} logged")
+            return
+
+        items = summary["best"] if view == "best" else summary["fastest"]
+        for i, entry in enumerate(items):
+            if view == "best":
+                values = (entry["name"], entry["q"], f"{entry['sales']:,}",
+                          f"{entry['units']:,}", f"{entry['revenue']:,}",
+                          f"{entry['profit']:,}" if entry["known_cost"] else "—")
+            else:
+                values = (entry["name"], entry["q"], f"{entry['sales']:,}",
+                          self._spell_hours(entry["median_hours"]),
+                          f"{entry['per_day']:,}" if entry["per_day"] else "—")
+            tree.insert("", "end", values=values,
+                        tags=("odd",) if i % 2 else ())
+        if view == "fastest":
+            self.sales_note.configure(
+                text="Time from listing to sale. Counts only listings the app "
+                     "was tracking, so it knows when they went up.")
+        else:
+            self.sales_note.configure(
+                text="Profit is net of the 5% tax, and only where the buy "
+                     "price was recorded.")
+
+    def _row_menu(self, event, tree, tier=None):
+        """Right-click on any row: copy the name, or stop showing the item."""
+        iid = tree.identify_row(event.y)
+        if not iid:
+            return
+        tree.selection_set(iid)
+        values = tree.item(iid, "values")
+        label = str(values[0]).strip() if values else ""
+        # The listings tree puts a count after the name; the clipboard wants
+        # the name the game's search box will accept and nothing else.
+        name = re.sub(r"\s*\(\d+ listings?\)$", "", label).strip()
+
+        menu = tk.Menu(self, tearoff=0, bg=PANEL, fg=INK,
+                       activebackground=GOLD, activeforeground=BG)
+        menu.add_command(label="Copy name",
+                         command=lambda: self.copy_text(name))
+        row = None
+        if tier is not None:
+            try:
+                row = self.rows_for(tier)[int(iid)]
+            except (ValueError, IndexError, KeyError):
+                row = None
+        if row:
+            menu.add_separator()
+            menu.add_command(label=f"Hide {row['n']} everywhere",
+                             command=lambda: self.hide_item(row["id"], row["n"]))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def copy_text(self, text):
+        if not text:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status.set(f"Copied “{text}”.")
+
+    def hide_item(self, item_id, name):
+        """Drop an item from every table until you say otherwise."""
+        if store.hide_item(self.settings, item_id, name):
+            store.save_settings(self.settings)
+            self._draw_hidden()
+            self.fill()
+            self.status.set(f"{name} hidden — Settings lists what's hidden.")
+
+    def _unhide_selected(self):
+        sel = self.hidden_list.selection()
+        if not sel:
+            self.hidden_note.configure(text="Pick a row first.")
+            return
+        for iid in sel:
+            store.unhide_item(self.settings, int(iid))
+        store.save_settings(self.settings)
+        self._draw_hidden()
+        self.fill()
+
+    def _draw_hidden(self):
+        tree = getattr(self, "hidden_list", None)
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        rows = store.clean_hidden(self.settings.get("hidden"))
+        for i, entry in enumerate(rows):
+            tree.insert("", "end", iid=str(entry["id"]),
+                        values=(entry["name"],),
+                        tags=("odd",) if i % 2 else ())
+        self.hidden_note.configure(
+            text="Nothing hidden." if not rows else
+            f"{len(rows)} item{'' if len(rows) == 1 else 's'} hidden from "
+            f"every table.")
+
     def _settings_tab(self, parent):
         ttk.Label(parent, style="Dim.TLabel", wraplength=1320, justify="left",
                   text="Colours are set by role rather than by widget, so a "
@@ -948,6 +1179,27 @@ class App(tk.Tk):
         self.retainer_note = ttk.Label(parent, style="Dim.TLabel")
         self.retainer_note.pack(anchor="w", pady=(6, 0))
         self._draw_retainers()
+
+        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=(16, 14))
+        ttk.Label(parent, text="HIDDEN ITEMS", style="Dim.TLabel").pack(anchor="w")
+        ttk.Label(parent, style="Dim.TLabel", wraplength=self.px(700),
+                  justify="left",
+                  text="Right-click any row and choose Hide to drop an item "
+                       "from every table. Useful for the ones that look "
+                       "profitable every scan and never are. They stay out "
+                       "until you bring them back here."
+                  ).pack(anchor="w", pady=(2, 8))
+        self.hidden_list = ttk.Treeview(parent, columns=("name",),
+                                        show="headings", height=6)
+        self.hidden_list.heading("name", text="Item")
+        self.hidden_list.column("name", width=self.px(340), anchor="w")
+        self.hidden_list.tag_configure("odd", background=PANEL_2)
+        self.hidden_list.pack(anchor="w", fill="x", pady=(0, 0))
+        ttk.Button(parent, text="Show these again",
+                   command=self._unhide_selected).pack(anchor="w", pady=(6, 0))
+        self.hidden_note = ttk.Label(parent, style="Dim.TLabel")
+        self.hidden_note.pack(anchor="w", pady=(6, 0))
+        self._draw_hidden()
         self._check_contrast()
 
     def _known_worlds(self):
@@ -1619,6 +1871,8 @@ class App(tk.Tk):
             self._auto_find_mine()
         if TAB_NAMES[idx] == "Look up an item":
             self._auto_index()
+        if TAB_NAMES[idx] == "Sales":
+            self.draw_sales()
         if idx >= len(TIER_ORDER):
             self.sell_label.configure(text="SHOPPING LIST")
             for child in self.world_box.winfo_children():
@@ -1942,12 +2196,15 @@ class App(tk.Tk):
             return []
         world = self.world.get(tier)
         needle = self.search.get().strip().lower()
+        hidden = store.hidden_ids(self.settings)
         out = []
         for r in self.results["tables"].get(tier, []):
             v = r["w"].get(world)
             if not v:
                 continue
             if needle and needle not in r["n"].lower() and needle not in r["c"].lower():
+                continue
+            if r["id"] in hidden:
                 continue
             if self.settings["min_margin"] and v["m"] < self.settings["min_margin"]:
                 continue
@@ -3112,6 +3369,30 @@ class App(tk.Tk):
             })
             if info.get("state") == "undercut":
                 undercut += 1
+
+        # A listing the board recorded a sale for is income, and the position
+        # is finished -- drop it so it isn't checked, or counted, twice.
+        logged, done = [], []
+        for key, info in manual.items():
+            pos = self.positions.get(key)
+            if not pos or info.get("state") != "sold":
+                continue
+            logged.append({
+                "id": pos["id"], "name": pos.get("name"),
+                "q": pos.get("q"), "world": pos.get("world"),
+                "qty": info.get("sold_qty") or pos.get("qty"),
+                "price": info.get("sold_price") or pos.get("price"),
+                "cost": pos.get("cost"),
+                "listed_at": pos.get("at"), "sold_at": info.get("sold_at"),
+            })
+            done.append(key)
+        sold_now = 0
+        if logged:
+            sold_now = store.record_sales(self.sales, logged)
+            store.save_sales(self.sales)
+            for key in done:
+                self.positions.pop(key, None)
+            self.draw_sales()
         store.save_positions(self.positions)
         self.draw_positions()
         bits = []
@@ -3121,6 +3402,8 @@ class App(tk.Tk):
                         f"{lowest} cheapest on their board")
             if gone:
                 bits.append(f"{gone} no longer on the board — sold, or taken down")
+        if sold_now:
+            bits.append(f"{sold_now} sold — logged under Sales")
         if self.positions:
             total = len(self.positions)
             bits.append(f"{undercut} of {total} recorded listings undercut"

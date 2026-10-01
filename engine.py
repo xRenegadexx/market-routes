@@ -1273,14 +1273,76 @@ def snapshot_age_hours():
         return None
 
 
+def claim_sale(history, price, qty, since, claimed):
+    """Find the sale that matches one of your listings, if there is one.
+
+    Matching is on the exact price. A sale price on this board is whatever the
+    listing asked, so an exact match is both available and the strongest
+    evidence there is; anything looser would start attributing other sellers'
+    sales to you.
+
+    `claimed` carries the entries already spoken for, so two identical stacks
+    of yours can't both be settled by the same single sale.
+
+    Returns the matching entry, or None -- and None is the answer whenever a
+    listing simply went away. Expired, withdrawn by you, returned by the game:
+    none of those leave a transaction behind, and none of them are income.
+    """
+    best = None
+    for index, sale in enumerate(history):
+        if index in claimed:
+            continue
+        if sale.get("pricePerUnit") != price:
+            continue
+        if sale.get("timestamp", 0) < since:
+            continue
+        # Prefer an exact quantity match; fall back to any, because the game
+        # splits a stack across buyers who take part of it.
+        if sale.get("quantity") == qty:
+            claimed.add(index)
+            return sale
+        if best is None:
+            best = index
+    if best is not None:
+        claimed.add(best)
+        return history[best]
+    return None
+
+
+def still_listed(mine, price, qty, taken):
+    """Is one of your listings at this price and size still on the board?
+
+    Listings carry no id, so identity has to come from price and quantity. Each
+    match is consumed, so six identical stacks need six surviving listings to
+    all count as present -- otherwise one listing would vouch for all of them
+    and a sale would never be noticed.
+    """
+    for index, listing in enumerate(mine):
+        if index in taken:
+            continue
+        if listing.get("pricePerUnit") == price and listing.get("quantity") == qty:
+            taken.add(index)
+            return True
+    for index, listing in enumerate(mine):
+        if index not in taken and listing.get("pricePerUnit") == price:
+            taken.add(index)
+            return True
+    return False
+
+
 def check_positions(positions, retainers=None, report=None, should_stop=None):
     """Look up just the items you've listed, on just the worlds you listed them.
 
     One request per board -- not per listing -- so several stacks of the same
     item cost a single lookup, and the whole check takes seconds rather than
-    the minutes a full scan needs. It reports where your price sits
-    on the board now; it cannot tell you an item sold, because listings carry no
-    identity we could match yours against.
+    the minutes a full scan needs.
+
+    It reports where your price sits on the board now, and whether a listing
+    has left it. A departure is only called a sale when the board's own history
+    records one at that price since you listed; see claim_sale. Everything else
+    is reported as removed, which covers withdrawing a listing yourself and
+    anything the game does to listings left alone too long. Guessing from the
+    absence of a listing would book those as income.
     """
     report = report or (lambda m, f=None: None)
     should_stop = should_stop or (lambda: False)
@@ -1329,10 +1391,39 @@ def check_positions(positions, retainers=None, report=None, should_stop=None):
         others = [l for l in listings
                   if str(l.get("retainerName") or "").lower() not in ours]
         low = others[0]["pricePerUnit"] if others else None
+        mine = [l for l in listings
+                if str(l.get("retainerName") or "").lower() in ours]
+        history = sorted(history, key=lambda h: -h.get("timestamp", 0))
+        taken, claimed = set(), set()
 
         for key in keys:
             pos = positions[key]
             yours = pos["price"]
+            # Has this listing left the board? Only ask when we know which
+            # listings are yours; without retainer names every board looks like
+            # it has none of yours on it, and everything would read as sold.
+            if ours and not still_listed(mine, yours, pos.get("qty"), taken):
+                sale = claim_sale(history, yours, pos.get("qty"),
+                                  pos.get("at", 0) / 1000.0, claimed)
+                if sale:
+                    out[key] = {
+                        "state": "sold",
+                        "low": low,
+                        "under": 0,
+                        "sold_at": int(sale["timestamp"] * 1000),
+                        "sold_qty": sale.get("quantity") or pos.get("qty"),
+                        "sold_price": sale["pricePerUnit"],
+                        "note": f"sold for {sale['pricePerUnit']:,} each",
+                    }
+                else:
+                    out[key] = {
+                        "state": "removed",
+                        "low": low,
+                        "under": 0,
+                        "note": "gone from the board, with no matching sale "
+                                "— taken down, or returned to the retainer",
+                    }
+                continue
             if not listings:
                 out[key] = {"state": "empty", "low": None, "under": 0,
                             "note": "nothing listed on that world at all"}
@@ -1348,7 +1439,11 @@ def check_positions(positions, retainers=None, report=None, should_stop=None):
                 "state": "undercut" if under else "lowest",
                 "low": low,
                 "under": under,
-                "gap": yours - low,
+                # No one else on the board means no gap to report. This used to
+                # subtract from None and take the whole price check down with
+                # it, which is to say it broke precisely when you had a board
+                # to yourself.
+                "gap": (yours - low) if low is not None else None,
                 "sold_since": sum(h["quantity"] for h in recent),
                 "note": (f"{under} unit(s) listed below you"
                          if under else "you are still the cheapest"),
