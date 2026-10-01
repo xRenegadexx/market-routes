@@ -99,18 +99,5 @@ in the data folder records crashes with the version number.
 
 ---
 
-## Releasing (maintainer)
-
-```bash
-python release.py 1.9.4 "What changed"
-```
-
-Bumps the version, builds, commits, pushes and publishes the release with the
-exe attached. Tags need three numbers — `v1.9.4` works, `v1.9` parses as `0.0.0`
-and nobody is ever offered it.
-
-Requires the [GitHub CLI](https://cli.github.com) logged in from a
-**non-elevated** prompt — an elevated one can't read the saved token.
-
 Unofficial tool, not affiliated with or endorsed by Square Enix.
 FINAL FANTASY XIV © SQUARE ENIX CO., LTD.

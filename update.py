@@ -45,7 +45,7 @@ CONFIG = os.path.join(HERE, "config.json")
 
 # The files a source install is allowed to replace.
 TRACKED = ["app.py", "engine.py", "store.py", "paths.py", "update.py",
-           "make_icon.py", "README.md"]
+           "README.md"]
 
 UA = {"User-Agent": "ffxiv-arb-updater/1.0", "Accept": "application/vnd.github+json"}
 TIMEOUT = 30
