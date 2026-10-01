@@ -523,8 +523,12 @@ class App(tk.Tk):
         bar.add_cascade(label="Data", menu=data)
 
         setmenu = tk.Menu(bar, tearoff=0, **opts)
-        setmenu.add_command(label="Colours…", command=self.open_settings)
-        setmenu.add_command(label="My retainers…", command=self.open_settings)
+        setmenu.add_command(label="Colours…",
+                            command=lambda: self.open_panel("colours"))
+        setmenu.add_command(label="My retainers…",
+                            command=lambda: self.open_panel("retainers"))
+        setmenu.add_command(label="Hidden items…",
+                            command=lambda: self.open_panel("hidden"))
         setmenu.add_separator()
         setmenu.add_command(label="Open the data folder",
                             command=self.open_data_folder)
@@ -841,24 +845,8 @@ class App(tk.Tk):
     # -- settings ----------------------------------------------------------
 
     def open_settings(self):
-        """Settings live in their own window, opened from the menu bar."""
-        existing = getattr(self, "_settings_win", None)
-        if existing is not None and existing.winfo_exists():
-            existing.lift()
-            existing.focus_force()
-            return
-        win = tk.Toplevel(self)
-        win.title("Settings")
-        win.configure(bg=BG)
-        win.geometry(f"{self.px(760)}x{self.px(620)}")
-        win.transient(self)
-        self._settings_win = win
-        frame = ttk.Frame(win)
-        frame.pack(fill="both", expand=True, padx=18, pady=14)
-        self._settings_tab(frame)
-        ttk.Button(win, text="Close", command=win.destroy).pack(
-            anchor="e", padx=18, pady=(0, 14))
-        win.bind("<Escape>", lambda e: win.destroy())
+        """Kept for callers that just want somewhere to start."""
+        self.open_panel("colours")
 
     def open_data_folder(self):
         import subprocess
@@ -1074,7 +1062,7 @@ class App(tk.Tk):
 
     def _draw_hidden(self):
         tree = getattr(self, "hidden_list", None)
-        if tree is None:
+        if not self._alive(tree):
             return
         tree.delete(*tree.get_children())
         rows = store.clean_hidden(self.settings.get("hidden"))
@@ -1087,7 +1075,8 @@ class App(tk.Tk):
             f"{len(rows)} item{'' if len(rows) == 1 else 's'} hidden from "
             f"every table.")
 
-    def _settings_tab(self, parent):
+    def _colours_panel(self, parent):
+        """Palette roles, presets and the contrast check."""
         ttk.Label(parent, style="Dim.TLabel", wraplength=1320, justify="left",
                   text="Colours are set by role rather than by widget, so a "
                        "change stays consistent everywhere. Positive and warning "
@@ -1095,7 +1084,6 @@ class App(tk.Tk):
                        "they carry meaning, and shouldn't end up the same hue as "
                        "a heading."
                   ).pack(anchor="w", pady=(4, 10))
-
         top = ttk.Frame(parent)
         top.pack(fill="x", pady=(0, 12))
         ttk.Label(top, text="PRESET", style="Dim.TLabel").pack(side="left",
@@ -1110,7 +1098,6 @@ class App(tk.Tk):
                    command=self._reset_theme).pack(side="right")
         self.theme_note = ttk.Label(top, style="Dim.TLabel")
         self.theme_note.pack(side="left", padx=(16, 0))
-
         grid = ttk.Frame(parent)
         grid.pack(fill="x")
         self.swatches = {}
@@ -1131,15 +1118,15 @@ class App(tk.Tk):
             chip.pack_propagate(False)
             self.swatches[key] = (var, chip)
             var.trace_add("write", lambda *_a, k=key: self._colour_typed(k))
-
         ttk.Label(parent, style="Dim.TLabel", wraplength=self.px(700),
                   justify="left",
                   text="Type any #rrggbb value. Changes apply as you type and "
                        "save themselves."
                   ).pack(anchor="w", pady=(14, 0))
+        self._check_contrast()
 
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=(16, 14))
-        ttk.Label(parent, text="MY RETAINERS", style="Dim.TLabel").pack(anchor="w")
+    def _retainers_panel(self, parent):
+        """Retainer names and the world each one lives on."""
         ttk.Label(parent, style="Dim.TLabel", wraplength=self.px(700),
                   justify="left",
                   text="Universalis publishes the retainer name on every listing, "
@@ -1163,7 +1150,6 @@ class App(tk.Tk):
         self.retainer_box.pack(side="left", padx=(0, 12))
         ttk.Button(add, text="Add", command=self._add_retainer).pack(side="left")
         entry.bind("<Return>", lambda e: self._add_retainer())
-
         self.retainer_list = ttk.Treeview(
             parent, columns=("name", "world"), show="headings", height=6,
             selectmode="browse")
@@ -1180,8 +1166,8 @@ class App(tk.Tk):
         self.retainer_note.pack(anchor="w", pady=(6, 0))
         self._draw_retainers()
 
-        ttk.Separator(parent, orient="horizontal").pack(fill="x", pady=(16, 14))
-        ttk.Label(parent, text="HIDDEN ITEMS", style="Dim.TLabel").pack(anchor="w")
+    def _hidden_panel(self, parent):
+        """Items dropped from every table."""
         ttk.Label(parent, style="Dim.TLabel", wraplength=self.px(700),
                   justify="left",
                   text="Right-click any row and choose Hide to drop an item "
@@ -1200,7 +1186,39 @@ class App(tk.Tk):
         self.hidden_note = ttk.Label(parent, style="Dim.TLabel")
         self.hidden_note.pack(anchor="w", pady=(6, 0))
         self._draw_hidden()
-        self._check_contrast()
+
+    PANELS = {
+        "colours": ("Colours", 760, 620),
+        "retainers": ("My retainers", 620, 520),
+        "hidden": ("Hidden items", 560, 440),
+    }
+
+    def open_panel(self, key):
+        """One window per settings section, reused if already open.
+
+        They were a single window with everything stacked down it, which
+        made the two menu entries pointing at it misleading: whichever you
+        picked, you got the same page and had to go hunting.
+        """
+        windows = self.__dict__.setdefault("_panels", {})
+        existing = windows.get(key)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+        title, width, height = self.PANELS[key]
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.configure(bg=BG)
+        win.geometry(f"{self.px(width)}x{self.px(height)}")
+        win.transient(self)
+        windows[key] = win
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=18, pady=14)
+        getattr(self, f"_{key}_panel")(frame)
+        ttk.Button(win, text="Close", command=win.destroy).pack(
+            anchor="e", padx=18, pady=(0, 14))
+        win.bind("<Escape>", lambda e: win.destroy())
 
     def _known_worlds(self):
         """Every world the app has seen, for the retainer picker."""
@@ -1249,10 +1267,25 @@ class App(tk.Tk):
         self._draw_retainers()
         self.fill()
 
+    @staticmethod
+    def _alive(widget):
+        """Is this widget still on screen?
+
+        Each settings panel is its own window now, so any of them can be shut
+        while something else asks for a redraw. The attribute survives the
+        window; the widget does not.
+        """
+        try:
+            return widget is not None and widget.winfo_exists()
+        except tk.TclError:
+            return False
+
     def _draw_retainers(self):
         rows = store.clean_retainers(self.settings.get("retainers"))
         self.settings["retainers"] = rows
-        tree = self.retainer_list
+        tree = getattr(self, "retainer_list", None)
+        if not self._alive(tree):
+            return
         tree.delete(*tree.get_children())
         missing = 0
         for i, r in enumerate(rows):
@@ -1342,6 +1375,8 @@ class App(tk.Tk):
 
     def _check_contrast(self):
         """Warn when a palette makes text hard to read, rather than allowing it silently."""
+        if not self._alive(getattr(self, "theme_note", None)):
+            return
         def lum(hexv):
             parts = []
             for i in (1, 3, 5):
@@ -3053,7 +3088,7 @@ class App(tk.Tk):
             self.show_banner(
                 "To find your listings the app needs to know your retainer names. "
                 "Settings → My retainers, with the world each one lives on.",
-                self.open_settings, "Open Settings")
+                lambda: self.open_panel("retainers"), "Open Settings")
             return
         worlds = sorted({r["world"] for r in retainers if r.get("world")})
         if not worlds:
@@ -3096,7 +3131,7 @@ class App(tk.Tk):
                 f"marketable item, so the names or worlds are the thing to "
                 f"check — they must match the game exactly, and a retainer only "
                 f"shows up while it has something on the board.",
-                self.open_settings, "Open Settings")
+                lambda: self.open_panel("retainers"), "Open Settings")
             return
         boards = len({(r["id"], r["q"], r["world"]) for r in found})
         units = sum(r["qty"] or 0 for r in found)
